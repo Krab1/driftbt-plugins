@@ -96,6 +96,16 @@ Every request gets a valid JSON reply (`-32602` for a bad hash, `-32601` for an 
 
 What Phase 1 cannot hide: it sends no peer traffic, so a tracker (or a swarm crawler) that connects to the announced port finds nothing there; all peers of one machine share its IP; and there is no real data behind `uploaded`. Phases 2 and 3 address these.
 
+## Per-torrent settings and statistics (Drift 0.1.28 and newer)
+
+The plugin declares `torrent_settings` and `"torrent_status": true` in `plugin.json`, so Drift's right-click menu for a torrent offers:
+
+- **Simulate this torrent** opens a dialog (mode, peers, upload and download speed pattern and limits, partial share, piece strategy, follow tracker data, daily activity pattern) before anything starts. The dialog starts from `get_options`: the torrent's own values if it is simulated, else the plugin's global settings.
+- **Simulation settings…** (when on) changes them. A change restarts that torrent's peers (their `stopped` goes out first and counters carry on). The same values sent again change nothing.
+- **Simulation statistics…** shows a Peers table (state, uploaded, downloaded, left, announces, next announce, last answer), what the tracker says (seeders and leechers other than ours, interval) and the last 40 events. Drift asks every 2 s while the window is open; the numbers live in the plugin's memory only (a few KB per torrent) and are dropped when the torrent is switched off or the plugin exits.
+
+Per-torrent choices are saved with the torrent (`options` in `state.json`) and laid over the global settings (`Settings::for_torrent`): only the twelve per-torrent keys can be overridden, so identity-level settings (stealth level, client profile, proxies) stay global. Without a form (an older Drift) the plugin behaves as before: the global settings at the moment the torrent is switched on.
+
 ## Phase 2: real BitTorrent transfer (built for `loopback_pair`)
 
 Modules `wire.rs` (BEP 3 handshake and messages), `pieces.rs` (bitfield and piece strategies), `swarm.rs` (nodes, sessions, choker, synthetic content).

@@ -23,6 +23,7 @@ use crate::proxy;
 use crate::settings::{Mode, ProxyMode, Settings};
 use crate::swarm::{Content, Node, NodeCfg, Swarm};
 use crate::state::{now_iso, Store, TorrentSel};
+use crate::stats::{self, PeerStat, Stats};
 use crate::tracker::{self, Answer, Params};
 
 /// How often a peer advances its counters.
@@ -62,6 +63,8 @@ struct Shared {
     store: Mutex<Store>,
     /// Encoded `name=value` pairs added to every tracker request (API key, extra query).
     extra: String,
+    /// Numbers for the statistics window (in memory only).
+    stats: Stats,
 }
 
 impl Shared {
@@ -82,11 +85,13 @@ struct LoopCtx {
     ids: Vec<Identity>,
     /// Bytes each peer already had when this run began (from its saved counters).
     had: Vec<u64>,
+    /// This torrent's settings (the global ones with its own choices laid over them).
+    cfg: Arc<Settings>,
 }
 
 impl LoopCtx {
-    async fn node(&self, sh: &Shared, hash: &str, ih: [u8; 20], total: u64, index: usize) -> Result<Arc<Node>, String> {
-        let s = &sh.settings;
+    async fn node(&self, hash: &str, ih: [u8; 20], total: u64, index: usize) -> Result<Arc<Node>, String> {
+        let s = &self.cfg;
         let swarm = self
             .swarm
             .get_or_try_init(|| async {
@@ -132,7 +137,7 @@ impl Sim {
         let enabled = store.state.torrents.values().filter(|t| t.enabled).count();
         info!("state loaded identities={} enabled_torrents={enabled}", store.state.identities.len());
         Self {
-            shared: Arc::new(Shared { settings, registry: Mutex::new(HashMap::new()), store: Mutex::new(store), extra: extra.join("&") }),
+            shared: Arc::new(Shared { settings, registry: Mutex::new(HashMap::new()), store: Mutex::new(store), extra: extra.join("&"), stats: Stats::default() }),
             rt,
             jobs: HashMap::new(),
             stopping: HashMap::new(),
@@ -167,7 +172,9 @@ impl Sim {
         }
     }
 
-    pub fn selection_changed(&mut self, hash: &str, enabled: bool, torrent: Option<Torrent>) -> Result<(), String> {
+    /// `options` are the torrent's own choices from Drift's form. Sent with `enabled` they start the simulation with those
+    /// choices, or, for a torrent already simulated, change them (its peers restart).
+    pub fn selection_changed(&mut self, hash: &str, enabled: bool, torrent: Option<Torrent>, options: Option<serde_json::Map<String, Value>>) -> Result<(), String> {
         let hash = hash.to_ascii_lowercase();
         if !valid_hash(&hash) {
             return Err("info_hash must be 40 hex digits".into());
@@ -176,26 +183,66 @@ impl Sim {
             t.info_hash.clone_from(&hash);
             lock(&self.shared.registry).insert(hash.clone(), t);
         }
-        let s = &self.shared.settings;
+        let mut restart = false;
         {
             let mut store = lock(&self.shared.store);
             let sel = store.state.torrents.entry(hash.clone()).or_default();
             if enabled {
-                if !sel.enabled || sel.mode.is_none() {
-                    *sel = TorrentSel { enabled: true, mode: Some(s.default_mode), peer_count: Some(s.pick_peer_count(crate::rng::entropy()).max(if s.default_mode == Mode::LoopbackPair { 2 } else { 1 })), started_at: Some(now_iso()) };
+                let was_on = sel.enabled && sel.mode.is_some();
+                // Keep only what differs from the plugin's own settings: what the user left alone keeps following them.
+                let defaults = self.shared.settings.effective_options();
+                let options = options.map(|mut o| {
+                    o.retain(|k, v| defaults.get(k) != Some(v));
+                    o
+                });
+                if !was_on || (options.is_some() && sel.options != options) {
+                    let opts = options.or_else(|| sel.options.clone().filter(|_| was_on));
+                    let eff = self.shared.settings.for_torrent(opts.as_ref().unwrap_or(&serde_json::Map::new()));
+                    let min_peers = if eff.default_mode == Mode::LoopbackPair { 2 } else { 1 };
+                    let started_at = if was_on { sel.started_at.clone() } else { Some(now_iso()) };
+                    *sel = TorrentSel { enabled: true, mode: Some(eff.default_mode), peer_count: Some(eff.pick_peer_count(crate::rng::entropy()).max(min_peers)), started_at, options: opts };
+                    restart = was_on;
                 }
             } else {
                 *sel = TorrentSel::default();
             }
             store.save();
         }
-        info!("selection_changed info_hash={hash} enabled={enabled}");
+        info!("selection_changed info_hash={hash} enabled={enabled}{}", if restart { " (settings changed, restarting)" } else { "" });
         if enabled {
+            if restart {
+                self.stop_job(&hash);
+            }
             self.start_job(&hash);
         } else {
             self.stop_job(&hash);
         }
         Ok(())
+    }
+
+    /// The values for the per-torrent form: the torrent's own if it is simulated, else the global settings.
+    pub fn options_for(&self, hash: &str) -> serde_json::Map<String, Value> {
+        let store = lock(&self.shared.store);
+        let g = &self.shared.settings;
+        match store.state.torrents.get(hash) {
+            Some(sel) if sel.enabled => {
+                let mut m = g.for_torrent(sel.options.as_ref().unwrap_or(&serde_json::Map::new())).effective_options();
+                // what this run actually uses (the peer count may have been drawn at random)
+                if let Some(mode) = sel.mode {
+                    m.insert("mode".into(), mode.name().into());
+                }
+                if let Some(n) = sel.peer_count {
+                    m.insert("peers".into(), n.into());
+                }
+                m
+            }
+            _ => g.effective_options(),
+        }
+    }
+
+    /// The statistics for one torrent (empty when it is not being simulated).
+    pub fn status(&self, hash: &str) -> Value {
+        self.shared.stats.status(hash)
     }
 
     /// Every torrent we know of (listed by Drift or saved), with the switch and a label for the ones that are on.
@@ -256,10 +303,13 @@ impl Sim {
             .await;
             let _ = gate_tx.send(true);
         });
-        let (mode, mut peers) = {
+        let (mode, mut peers, cfg) = {
             let store = lock(&self.shared.store);
             match store.state.torrents.get(hash) {
-                Some(t) if t.enabled => (t.mode.unwrap_or(self.shared.settings.default_mode), t.peer_count.unwrap_or(1)),
+                Some(t) if t.enabled => {
+                    let cfg = Arc::new(self.shared.settings.for_torrent(t.options.as_ref().unwrap_or(&serde_json::Map::new())));
+                    (t.mode.unwrap_or(cfg.default_mode), t.peer_count.unwrap_or(1), cfg)
+                }
                 _ => return,
             }
         };
@@ -267,13 +317,15 @@ impl Sim {
             peers = peers.max(2); // one seeds, the rest download from it and from each other
         }
         let (tx, rx) = watch::channel(false);
-        let s = &self.shared.settings;
+        let s = &*cfg;
+        self.shared.stats.start(hash);
+        self.shared.stats.log(hash, &format!("Simulation started: {}, {peers} peer{}", mode.name(), if peers == 1 { "" } else { "s" }));
         let ids: Vec<Identity> = (0..peers).map(|i| lock(&self.shared.store).identity(i, &s.client_profile, &s.custom_prefix)).collect();
         let had: Vec<u64> = {
             let store = lock(&self.shared.store);
             ids.iter().map(|id| s.persist_counters.then(|| store.state.counters.get(&format!("{}:{hash}", id.identity_id)).and_then(|c| c.have_bytes)).flatten().unwrap_or(0)).collect()
         };
-        let lo = (mode == Mode::LoopbackPair).then(|| Arc::new(LoopCtx { swarm: tokio::sync::OnceCell::new(), ids: ids.clone(), had }));
+        let lo = (mode == Mode::LoopbackPair).then(|| Arc::new(LoopCtx { swarm: tokio::sync::OnceCell::new(), ids: ids.clone(), had, cfg: cfg.clone() }));
         let mut handles = Vec::new();
         let own = Arc::new(Own::default());
         let mut taken: Vec<usize> = Vec::new();
@@ -299,7 +351,7 @@ impl Sim {
             };
             lock(&self.shared.store).set_proxy(i, def.filter(|_| s.proxy_mode == ProxyMode::PerPeer).map(|d| d.id.clone()));
             info!("{} uses {}", id.identity_id, def.map_or("a direct connection", |d| d.id.as_str()));
-            handles.push(self.rt.spawn(run_peer(self.shared.clone(), client, hash.to_string(), id, mode, lo.clone().map(|c| (c, i)), gate.clone(), own.clone(), rx.clone())));
+            handles.push(self.rt.spawn(run_peer(self.shared.clone(), client, hash.to_string(), id, mode, lo.clone().map(|c| (c, i)), gate.clone(), own.clone(), cfg.clone(), rx.clone())));
         }
         let name = self.shared.torrent(hash).map(|t| t.name).unwrap_or_default();
         info!("simulation started info_hash={hash} name={name:?} mode={} peers={peers}", mode.name());
@@ -309,13 +361,15 @@ impl Sim {
     /// Tells the job to stop. Its peers send `stopped` on their own; nothing waits for them here.
     fn stop_job(&mut self, hash: &str) {
         if let Some(job) = self.jobs.remove(hash) {
+            self.shared.stats.clear(hash);
             let _ = job.stop.send(true);
             job.lo.iter().filter_map(|c| c.swarm.get()).for_each(Swarm::stop);
             self.stopping.retain(|_, v| {
                 v.retain(|h| !h.is_finished());
                 !v.is_empty()
             });
-            self.stopping.insert(hash.to_string(), job.handles);
+            // Handles of an earlier, still-finishing run stay in the list, so the next start waits for those too.
+            self.stopping.entry(hash.to_string()).or_default().extend(job.handles);
         }
     }
 }
@@ -439,6 +493,15 @@ async fn scrape_round(sh: &Shared, client: &reqwest::Client, hash: &str, ih: &[u
     None
 }
 
+/// Puts a peer's current numbers where the statistics window reads them.
+fn publish(sh: &Shared, hash: &str, who: &str, peer: &Peer, state: &'static str, next: Option<Instant>) {
+    sh.stats.with(hash, |t| {
+        if let Some(p) = t.peers.get_mut(who) {
+            (p.state, p.uploaded, p.downloaded, p.left, p.next_at) = (state, peer.uploaded, peer.downloaded, peer.left(), next);
+        }
+    });
+}
+
 fn flush(sh: &Shared, key: &str, peer: &Peer) {
     if sh.settings.persist_counters {
         let mut store = lock(&sh.store);
@@ -449,8 +512,8 @@ fn flush(sh: &Shared, key: &str, peer: &Peer) {
 
 /// One simulated peer of one torrent, from start to stop.
 #[allow(clippy::too_many_arguments)] // started from one place; a bundle struct would only rename the arguments
-async fn run_peer(sh: Arc<Shared>, client: reqwest::Client, hash: String, id: Identity, mode: Mode, lo: Option<(Arc<LoopCtx>, usize)>, mut gate: watch::Receiver<bool>, own: Arc<Own>, mut stop: watch::Receiver<bool>) {
-    let s = &sh.settings;
+async fn run_peer(sh: Arc<Shared>, client: reqwest::Client, hash: String, id: Identity, mode: Mode, lo: Option<(Arc<LoopCtx>, usize)>, mut gate: watch::Receiver<bool>, own: Arc<Own>, cfg: Arc<Settings>, mut stop: watch::Receiver<bool>) {
+    let s = &*cfg;
     // A previous run of this torrent is still saying goodbye: its final counters must be saved first.
     while !*gate.borrow() {
         tokio::select! {
@@ -473,7 +536,7 @@ async fn run_peer(sh: Arc<Shared>, client: reqwest::Client, hash: String, id: Id
     let saved = if s.persist_counters { lock(&sh.store).state.counters.get(&key).cloned() } else { None };
     // In a loopback swarm the first peer seeds and the others download.
     let (peer_mode, node) = match &lo {
-        Some((ctx, i)) => match ctx.node(&sh, &hash, ih, total, *i).await {
+        Some((ctx, i)) => match ctx.node(&hash, ih, total, *i).await {
             Ok(n) => (if *i == 0 { Mode::SeedOnly } else { Mode::DownloadAndSeed }, Some(n)),
             Err(e) => {
                 warn!("{} not started: loopback swarm failed: {e}", id.identity_id);
@@ -486,6 +549,11 @@ async fn run_peer(sh: Arc<Shared>, client: reqwest::Client, hash: String, id: Id
     if node.is_some() {
         peer.use_measured();
     }
+    let who = peer.identity.identity_id.clone();
+    sh.stats.with(&hash, |t| {
+        t.peers.insert(who.clone(), PeerStat { client: peer.identity.client_profile.clone(), proxy: peer.identity.proxy_id.clone().unwrap_or_default(), state: "waiting", left: peer.left(), ..Default::default() });
+    });
+    let mut next_stat = Instant::now();
     let first = Instant::now() + peer.initial_delay(s.start_delay_max_ms);
     let (mut next, mut next_scrape) = (first, first + peer.jittered(s.scrape_interval_ms));
     let (mut started, mut fails, mut last) = (false, 0u32, Instant::now());
@@ -515,6 +583,10 @@ async fn run_peer(sh: Arc<Shared>, client: reqwest::Client, hash: String, id: Id
                 None => peer.step(dt),
             }
         }
+        if now >= next_stat {
+            publish(&sh, &hash, &who, &peer, if started { "active" } else { "waiting" }, Some(next));
+            next_stat = now + Duration::from_secs(1);
+        }
         if now >= next {
             let event = if !started {
                 s.send_started.then_some("started")
@@ -534,8 +606,22 @@ async fn run_peer(sh: Arc<Shared>, client: reqwest::Client, hash: String, id: Id
                     fails = 0;
                     peer.last_announce = Some(now_iso());
                     own.set(&mut counted, Some(peer.left() == 0));
+                    sh.stats.with(&hash, |t| {
+                        if let Some(p) = t.peers.get_mut(&who) {
+                            p.announces += 1;
+                            p.last_answer = "ok".into();
+                        }
+                        if a.complete.is_some() || a.incomplete.is_some() {
+                            // the tracker counts our own peers too; the window shows everyone else
+                            let others = Demand::from_counts(a.complete, a.incomplete, u64::from(own.seeders.load(Relaxed)), u64::from(own.leechers.load(Relaxed)));
+                            (t.seeders, t.leechers) = (others.seeders, others.leechers);
+                        }
+                        t.interval = a.interval.or(t.interval);
+                    });
+                    sh.stats.log(&hash, &format!("{who} announce {} ok: uploaded {}, downloaded {}, left {}", event.unwrap_or("(periodic)"), stats::human(peer.uploaded), stats::human(peer.downloaded), stats::human(peer.left())));
                     if let Some(w) = &a.warning {
                         if last_warning.as_ref() != Some(w) {
+                            sh.stats.log(&hash, &format!("{who} tracker warning: {w}"));
                             warn!("tracker warning identity={}: {w}", peer.identity.identity_id);
                             last_warning = Some(w.clone());
                         }
@@ -552,6 +638,7 @@ async fn run_peer(sh: Arc<Shared>, client: reqwest::Client, hash: String, id: Id
                         }
                     }
                     next = Instant::now() + peer.announce_delay(hint);
+                    publish(&sh, &hash, &who, &peer, "active", Some(next));
                     flush(&sh, &key, &peer);
                 }
                 Outcome::NoTracker => {
@@ -571,6 +658,13 @@ async fn run_peer(sh: Arc<Shared>, client: reqwest::Client, hash: String, id: Id
                         retry = retry.max(Duration::from_secs(60 * u64::from(fails.min(5))));
                     }
                     warn!("tracker request failed identity={} {e} retry_ms={}", peer.identity.identity_id, retry.as_millis());
+                    let short: String = e.chars().take(60).collect();
+                    sh.stats.with(&hash, |t| {
+                        if let Some(p) = t.peers.get_mut(&who) {
+                            p.last_answer = short.clone();
+                        }
+                    });
+                    sh.stats.log(&hash, &format!("{who} announce failed: {short} (retry in {} s)", retry.as_secs()));
                     next = Instant::now() + retry;
                 }
             }
@@ -585,6 +679,7 @@ async fn run_peer(sh: Arc<Shared>, client: reqwest::Client, hash: String, id: Id
         }
     }
     own.set(&mut counted, None);
+    publish(&sh, &hash, &who, &peer, "stopped", None);
     if started {
         let stopped = announce_round(&sh, &client, &hash, &ih, &peer, &profile, Some("stopped"), STOPPED_TRY_TIMEOUT);
         if tokio::time::timeout(STOP_ANNOUNCE_TIMEOUT, stopped).await.is_err() {
@@ -620,13 +715,13 @@ mod tests {
         assert_eq!((is_on(&sim, &a), is_on(&sim, &b)), (Some(false), Some(false)), "nothing is simulated by default");
         assert!(sim.jobs.is_empty());
 
-        sim.selection_changed(&a, true, None).unwrap();
-        sim.selection_changed(&b, true, Some(torrent(&b))).unwrap();
+        sim.selection_changed(&a, true, None, None).unwrap();
+        sim.selection_changed(&b, true, Some(torrent(&b)), None).unwrap();
         let row = sim.selections().into_iter().find(|r| r["info_hash"] == a.as_str()).unwrap();
         assert_eq!(row["label"], "Simulating: seed_only, 2 peers");
         assert_eq!(sim.jobs.len(), 2);
 
-        sim.selection_changed(&a, false, None).unwrap();
+        sim.selection_changed(&a, false, None, None).unwrap();
         assert_eq!((is_on(&sim, &a), is_on(&sim, &b)), (Some(false), Some(true)), "b is untouched");
         assert_eq!(sim.jobs.len(), 1);
         sim.shutdown();
@@ -656,11 +751,47 @@ mod tests {
     }
 
     #[test]
+    fn a_torrents_own_settings_are_kept_and_changing_them_restarts_it() {
+        let h = "c".repeat(40);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = std::env::temp_dir().join(format!("tracker-sim-opts-{}", crate::rng::entropy()));
+        let settings = Settings::from_json(&json!({"data_dir": dir.to_string_lossy(), "default_peer_count": 1, "upload_max_kbps": 800}));
+        let mut sim = Sim::new(settings.clone(), "", rt.handle().clone());
+        let opts = |v: Value| v.as_object().cloned();
+
+        let before = sim.options_for(&h);
+        assert_eq!((before["mode"].as_str(), before["peers"].as_u64(), before["upload_max_kbps"].as_u64()), (Some("seed_only"), Some(1), Some(800)), "an unsimulated torrent shows the defaults");
+
+        sim.selection_changed(&h, true, Some(torrent(&h)), opts(json!({"mode": "partial_seed", "peers": 3, "upload_max_kbps": 100}))).unwrap();
+        let row = sim.selections().into_iter().find(|r| r["info_hash"] == h.as_str()).unwrap();
+        assert_eq!(row["label"], "Simulating: partial_seed, 3 peers");
+        let now = sim.options_for(&h);
+        assert_eq!((now["mode"].as_str(), now["peers"].as_u64(), now["upload_max_kbps"].as_u64()), (Some("partial_seed"), Some(3), Some(100)));
+        assert_eq!(sim.jobs.len(), 1);
+
+        // the same choices again change nothing; different ones restart it with the new count
+        sim.selection_changed(&h, true, None, opts(json!({"mode": "partial_seed", "peers": 3, "upload_max_kbps": 100}))).unwrap();
+        sim.selection_changed(&h, true, None, opts(json!({"mode": "seed_only", "peers": 2}))).unwrap();
+        let row = sim.selections().into_iter().find(|r| r["info_hash"] == h.as_str()).unwrap();
+        assert_eq!(row["label"], "Simulating: seed_only, 2 peers");
+        assert_eq!(sim.status(&h)["tables"][0]["title"], "Peers");
+        sim.shutdown();
+
+        // it all survives a restart; switching off forgets it
+        let mut sim = Sim::new(settings, "", rt.handle().clone());
+        assert_eq!(sim.options_for(&h)["peers"].as_u64(), Some(2));
+        sim.selection_changed(&h, false, None, None).unwrap();
+        assert_eq!(sim.options_for(&h)["peers"].as_u64(), Some(1), "back to the defaults");
+        assert_eq!(sim.status(&h)["log"], json!([]), "no statistics once it is off");
+        sim.shutdown();
+    }
+
+    #[test]
     fn bad_hash_is_rejected() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let dir = std::env::temp_dir().join(format!("tracker-sim-jobs-{}", crate::rng::entropy()));
         let mut sim = Sim::new(Settings::from_json(&json!({"data_dir": dir.to_string_lossy()})), "", rt.handle().clone());
-        assert!(sim.selection_changed("zz", true, None).is_err());
+        assert!(sim.selection_changed("zz", true, None, None).is_err());
     }
 
     #[test]

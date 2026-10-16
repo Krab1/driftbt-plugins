@@ -304,3 +304,34 @@ fn uploads_when_the_tracker_reports_leechers() {
     let ups: Vec<u64> = hits.iter().filter(|h| h.event() != "stopped").map(|h| h.n("uploaded")).collect();
     assert!(ups.len() >= 2 && ups[0] == 0 && ups[1] > 500_000, "five leechers: {ups:?}");
 }
+
+#[test]
+fn options_and_statistics_work_through_the_protocol() {
+    let dir = std::env::temp_dir().join(format!("tracker-sim-form-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (port, rx) = stub_tracker();
+    let mut p = Plugin::start();
+    p.call(1, "initialize", json!({"api": 1, "app_version": "1", "settings": settings(&dir)}));
+    let t = torrent(HASH, port);
+    p.send(json!({"jsonrpc": "2.0", "method": "torrents_updated", "params": {"torrents": [t.clone()]}}));
+
+    let defaults = p.call(2, "get_options", json!({"info_hash": HASH}))["result"]["options"].clone();
+    assert_eq!((defaults["mode"].clone(), defaults["peers"].clone()), (json!("seed_only"), json!(1)), "an unsimulated torrent shows the defaults");
+
+    p.call(3, "selection_changed", json!({"info_hash": HASH, "enabled": true, "torrent": t, "options": {"peers": 2, "upload_max_kbps": 300, "mode": "seed_only"}}));
+    assert_eq!(p.call(4, "get_options", json!({"info_hash": HASH}))["result"]["options"]["peers"], json!(2));
+    let hits = drain(&rx, Duration::from_secs(4));
+    let ids: std::collections::BTreeSet<&str> = hits.iter().map(|h| h.get("peer_id")).collect();
+    assert_eq!(ids.len(), 2, "two peers, as chosen for this torrent");
+
+    let status = p.call(5, "get_status", json!({"info_hash": HASH}))["result"]["status"].clone();
+    let peers = &status["tables"][0];
+    assert_eq!((peers["title"].clone(), peers["rows"].as_array().unwrap().len()), (json!("Peers"), 2));
+    assert!(peers["rows"][0][2] == "active" && peers["rows"][0][6].as_str().unwrap().parse::<u32>().unwrap() >= 1, "{peers}");
+    assert!(status["log"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().contains("announce started ok")), "{status}");
+
+    p.call(6, "selection_changed", json!({"info_hash": HASH, "enabled": false}));
+    assert_eq!(p.call(7, "get_status", json!({"info_hash": HASH}))["result"]["status"]["log"], json!([]), "nothing kept once it is off");
+    p.finish();
+    let _ = std::fs::remove_dir_all(&dir);
+}

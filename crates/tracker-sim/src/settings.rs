@@ -49,6 +49,14 @@ pub enum RateProfile {
 }
 
 impl RateProfile {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ConstantJitter => "constant_jitter",
+            Self::RandomWalk => "random_walk",
+            Self::Bursty => "bursty",
+        }
+    }
+
     fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "constant_jitter" => Self::ConstantJitter,
@@ -149,6 +157,8 @@ pub struct RateCfg {
 
 #[derive(Debug, Clone)]
 pub struct Settings {
+    /// The settings as Drift sent them, kept so a torrent's own choices can be laid over them.
+    pub raw: Value,
     pub stealth: Stealth,
     pub client_profile: String,
     pub default_mode: Mode,
@@ -180,6 +190,9 @@ pub struct Settings {
     pub data_dir: Option<String>,
     pub log_level: String,
 }
+
+/// What a torrent can set for itself: the fields of `torrent_settings` in plugin.json.
+const TORRENT_KEYS: [&str; 12] = ["mode", "peers", "upload_rate_profile", "upload_min_kbps", "upload_max_kbps", "download_rate_profile", "download_min_kbps", "download_max_kbps", "partial_availability_percent", "piece_strategy", "follow_tracker", "activity_pattern"];
 
 fn text<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
     v.get(k)?.as_str().map(str::trim).filter(|s| !s.is_empty())
@@ -241,8 +254,48 @@ impl Settings {
         lo + (random % (hi - lo + 1) as u64) as usize
     }
 
+    /// These settings with one torrent's own choices (the `torrent_settings` of plugin.json) laid over them. Only the
+    /// per-torrent keys count; `mode` and `peers` are the torrent forms of `default_mode` and `default_peer_count`.
+    pub fn for_torrent(&self, options: &serde_json::Map<String, Value>) -> Settings {
+        let mut m = self.raw.as_object().cloned().unwrap_or_default();
+        for (k, v) in options.iter().filter(|(k, _)| TORRENT_KEYS.contains(&k.as_str())) {
+            let key = match k.as_str() {
+                "mode" => "default_mode",
+                "peers" => "default_peer_count",
+                other => other,
+            };
+            m.insert(key.to_string(), v.clone());
+            if k == "peers" {
+                m.insert("peer_count_max".into(), Value::from(0)); // an exact number was asked for
+            }
+        }
+        let mut s = Settings::from_json(&Value::Object(m));
+        s.proxies.clone_from(&self.proxies); // their passwords were filled in after parsing
+        s
+    }
+
+    /// The values of the per-torrent form as these settings have them: what the form shows when nothing is saved.
+    pub fn effective_options(&self) -> serde_json::Map<String, Value> {
+        let kbps = |bps: f64| Value::from((bps / 1024.0).round() as u64);
+        let mut m = serde_json::Map::new();
+        m.insert("mode".into(), self.default_mode.name().into());
+        m.insert("peers".into(), self.default_peer_count.into());
+        m.insert("upload_rate_profile".into(), self.upload.profile.name().into());
+        m.insert("upload_min_kbps".into(), kbps(self.upload.min_bps));
+        m.insert("upload_max_kbps".into(), kbps(self.upload.max_bps));
+        m.insert("download_rate_profile".into(), self.download.profile.name().into());
+        m.insert("download_min_kbps".into(), kbps(self.download.min_bps));
+        m.insert("download_max_kbps".into(), kbps(self.download.max_bps));
+        m.insert("partial_availability_percent".into(), Value::from(self.partial_percent.round() as u64));
+        m.insert("piece_strategy".into(), self.piece_strategy.name().into());
+        m.insert("follow_tracker".into(), self.follow_tracker.into());
+        m.insert("activity_pattern".into(), self.activity_pattern.into());
+        m
+    }
+
     pub fn from_json(v: &Value) -> Self {
         Self {
+            raw: v.clone(),
             stealth: choice(v, "stealth_level", Stealth::parse, Stealth::High),
             client_profile: text(v, "client_profile").unwrap_or("auto").to_string(),
             default_mode: choice(v, "default_mode", Mode::parse, Mode::SeedOnly),
@@ -310,6 +363,27 @@ mod tests {
         assert_eq!(s.jitter, 0.9);
         assert!(s.upload.min_bps < s.upload.max_bps, "min and max are put in order");
         assert_eq!(s.announce_base_ms, 1000.0);
+    }
+
+    #[test]
+    fn a_torrents_choices_lay_over_the_global_settings() {
+        let g = Settings::from_json(&json!({"default_mode": "seed_only", "default_peer_count": 2, "peer_count_max": 5, "upload_max_kbps": 800, "stealth_level": "maximum", "proxy_mode": "per_peer", "proxies": [{"id": "a", "url": "socks5h://x:1"}]}));
+        let t = g.for_torrent(json!({"mode": "loopback_pair", "peers": 3, "upload_max_kbps": 100, "stealth_level": "basic", "bogus": 1}).as_object().unwrap());
+        assert_eq!((t.default_mode, t.default_peer_count, t.upload.max_bps), (Mode::LoopbackPair, 3, 100.0 * 1024.0));
+        assert!((0..30).all(|r| t.pick_peer_count(r) == 3), "an exact peer count replaces the random range");
+        assert_eq!(t.stealth, g.stealth, "only the per-torrent keys can be overridden");
+        assert_eq!(t.proxies, g.proxies);
+        let plain = g.for_torrent(&serde_json::Map::new());
+        assert_eq!((plain.default_peer_count, plain.peer_count_max), (2, 5), "no choices: the global settings as they are");
+    }
+
+    #[test]
+    fn the_form_starts_from_the_settings_and_reads_back() {
+        let g = Settings::from_json(&json!({"default_mode": "partial_seed", "upload_min_kbps": 50, "piece_strategy": "endgame_bias", "activity_pattern": true}));
+        let o = g.effective_options();
+        assert_eq!((o["mode"].as_str(), o["upload_min_kbps"].as_u64(), o["piece_strategy"].as_str(), o["activity_pattern"].as_bool()), (Some("partial_seed"), Some(50), Some("endgame_bias"), Some(true)));
+        let back = Settings::from_json(&Value::Object(g.for_torrent(&o).raw.as_object().unwrap().clone()));
+        assert_eq!((back.default_mode, back.upload.min_bps, back.piece_strategy), (g.default_mode, g.upload.min_bps, g.piece_strategy));
     }
 
     #[test]

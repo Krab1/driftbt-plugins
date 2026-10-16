@@ -23,6 +23,9 @@ pub struct TorrentSel {
     pub peer_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
+    /// This torrent's own choices from the form in Drift's torrent menu (see `Settings::for_torrent`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -147,7 +150,7 @@ mod tests {
         let mut s = Store::load(path.clone());
         let id = s.identity(1, "auto", "");
         assert_eq!(s.state.identities.len(), 2, "creating bot-002 also creates bot-001");
-        s.state.torrents.insert("ab".repeat(20), TorrentSel { enabled: true, mode: Some(Mode::SeedOnly), peer_count: Some(2), started_at: Some(now_iso()) });
+        s.state.torrents.insert("ab".repeat(20), TorrentSel { enabled: true, mode: Some(Mode::SeedOnly), peer_count: Some(2), started_at: Some(now_iso()), options: None });
         s.state.counters.insert("bot-001:x".into(), Counters { uploaded_bytes: 5, ..Default::default() });
         s.save();
         let back = Store::load(path);

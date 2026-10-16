@@ -59,6 +59,15 @@ pub enum Strategy {
 }
 
 impl Strategy {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Sequential => "sequential",
+            Self::Random => "random",
+            Self::RarestFirst => "rarest_first",
+            Self::EndgameBias => "endgame_bias",
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "sequential" => Self::Sequential,

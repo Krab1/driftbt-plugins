@@ -16,6 +16,7 @@ mod rate;
 mod rng;
 mod rpc;
 mod settings;
+mod stats;
 mod state;
 mod swarm;
 mod tracker;
@@ -67,12 +68,15 @@ fn main() {
                 json!({})
             }
             "get_selection" => json!({"selections": sim.get_or_insert_with(|| Sim::new(Settings::default(), "", rt.handle().clone())).selections()}),
+            "get_options" => json!({"options": sim.get_or_insert_with(|| Sim::new(Settings::default(), "", rt.handle().clone())).options_for(&msg.params["info_hash"].as_str().unwrap_or("").to_ascii_lowercase())}),
+            "get_status" => json!({"status": sim.get_or_insert_with(|| Sim::new(Settings::default(), "", rt.handle().clone())).status(&msg.params["info_hash"].as_str().unwrap_or("").to_ascii_lowercase())}),
             "selection_changed" => {
                 let hash = msg.params["info_hash"].as_str().unwrap_or("");
                 let enabled = msg.params["enabled"].as_bool().unwrap_or(false);
                 let torrent = serde_json::from_value::<Torrent>(msg.params["torrent"].clone()).ok();
+                let options = msg.params.get("options").and_then(Value::as_object).cloned();
                 let s = sim.get_or_insert_with(|| Sim::new(Settings::default(), "", rt.handle().clone()));
-                if let Err(e) = s.selection_changed(hash, enabled, torrent) {
+                if let Err(e) = s.selection_changed(hash, enabled, torrent, options) {
                     if msg.id.is_some() {
                         rpc::send(&rpc::err(&id, -32602, &e));
                     }
