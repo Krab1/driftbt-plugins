@@ -121,6 +121,18 @@ fn settings(dir: &std::path::Path) -> Value {
            "upload_rate_profile": "constant_jitter", "upload_min_kbps": 200, "upload_max_kbps": 400, "log_level": "debug", "follow_tracker": false})
 }
 
+/// What the torrent's own form would carry: the per-torrent choices that were once global settings.
+fn options(cfg: &Value) -> Value {
+    let keys = ["default_mode", "default_peer_count", "partial_availability_percent", "piece_strategy", "follow_tracker", "activity_pattern", "upload_rate_profile", "upload_min_kbps", "upload_max_kbps", "download_rate_profile", "download_min_kbps", "download_max_kbps"];
+    let mut o = serde_json::Map::new();
+    for k in keys {
+        if let Some(v) = cfg.get(k) {
+            o.insert(k.replace("default_mode", "mode").replace("default_peer_count", "peers"), v.clone());
+        }
+    }
+    Value::Object(o)
+}
+
 #[test]
 fn selected_torrent_announces_gradually_and_survives_a_restart() {
     let dir = std::env::temp_dir().join(format!("tracker-sim-it-{}", std::process::id()));
@@ -136,7 +148,7 @@ fn selected_torrent_announces_gradually_and_survives_a_restart() {
     assert!(sel["result"]["selections"].as_array().unwrap().iter().all(|s| s["enabled"] == false), "off by default");
     assert!(drain(&rx, Duration::from_millis(1500)).is_empty(), "nothing is announced before the user switches one on");
 
-    assert_eq!(p.call(11, "selection_changed", json!({"info_hash": HASH, "enabled": true, "torrent": torrent(HASH, port)}))["result"], json!({}));
+    assert_eq!(p.call(11, "selection_changed", json!({"info_hash": HASH, "enabled": true, "torrent": torrent(HASH, port), "options": options(&settings(&dir))}))["result"], json!({}));
     let sel = p.call(12, "get_selection", json!({}));
     let row = sel["result"]["selections"].as_array().unwrap().iter().find(|s| s["info_hash"] == HASH).unwrap().clone();
     assert_eq!((row["enabled"].clone(), row["label"].clone()), (json!(true), json!("Simulating: seed_only, 1 peer")));
@@ -164,7 +176,7 @@ fn selected_torrent_announces_gradually_and_survives_a_restart() {
     assert!(stopped.n("uploaded") >= last);
     assert_eq!(stopped.get("numwant"), "0");
     let stopped_before = stopped.n("uploaded");
-    p.call(14, "selection_changed", json!({"info_hash": HASH, "enabled": true, "torrent": torrent(HASH, port)}));
+    p.call(14, "selection_changed", json!({"info_hash": HASH, "enabled": true, "torrent": torrent(HASH, port), "options": options(&settings(&dir))}));
     let running = drain(&rx, Duration::from_millis(2500));
     assert!(running.iter().any(|h| h.event() == "started"), "switching it on again starts it again");
     p.finish();
@@ -219,7 +231,7 @@ fn per_peer_proxy_routes_announces_and_a_peer_without_proxy_stays_quiet() {
     let mut t = torrent(HASH, 9);
     t["trackers"] = json!(["http://tracker.invalid/announce"]);
     p.send(json!({"jsonrpc": "2.0", "method": "torrents_updated", "params": {"torrents": [t.clone()]}}));
-    p.call(2, "selection_changed", json!({"info_hash": HASH, "enabled": true, "torrent": t}));
+    p.call(2, "selection_changed", json!({"info_hash": HASH, "enabled": true, "torrent": t, "options": options(&cfg)}));
     let hits = drain(&rx, Duration::from_secs(4));
     assert!(hits.len() >= 2, "announces reach the proxy, got {}", hits.len());
     let ids: std::collections::BTreeSet<&str> = hits.iter().map(|h| h.get("peer_id")).collect();
@@ -248,7 +260,7 @@ fn loopback_pair_announces_bytes_that_really_moved() {
     let mut t = torrent(HASH, port);
     t["total_size"] = json!(TOTAL);
     p.send(json!({"jsonrpc": "2.0", "method": "torrents_updated", "params": {"torrents": [t.clone()]}}));
-    p.call(2, "selection_changed", json!({"info_hash": HASH, "enabled": true, "torrent": t}));
+    p.call(2, "selection_changed", json!({"info_hash": HASH, "enabled": true, "torrent": t, "options": options(&cfg)}));
     let hits = drain(&rx, Duration::from_secs(9));
     let sel = p.call(3, "get_selection", json!({}));
     assert_eq!(sel["result"]["selections"][0]["label"], "Simulating: loopback_pair, 2 peers");
@@ -281,7 +293,7 @@ fn follow_run(body: &'static str, secs: u64) -> Vec<Hit> {
     p.call(1, "initialize", json!({"api": 1, "app_version": "1", "settings": cfg}));
     let t = torrent(HASH, port);
     p.send(json!({"jsonrpc": "2.0", "method": "torrents_updated", "params": {"torrents": [t.clone()]}}));
-    p.call(2, "selection_changed", json!({"info_hash": HASH, "enabled": true, "torrent": t}));
+    p.call(2, "selection_changed", json!({"info_hash": HASH, "enabled": true, "torrent": t, "options": options(&cfg)}));
     let hits = drain(&rx, Duration::from_secs(secs));
     p.finish();
     let _ = std::fs::remove_dir_all(&dir);

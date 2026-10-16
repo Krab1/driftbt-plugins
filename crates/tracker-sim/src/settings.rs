@@ -194,6 +194,10 @@ pub struct Settings {
 /// What a torrent can set for itself: the fields of `torrent_settings` in plugin.json.
 const TORRENT_KEYS: [&str; 12] = ["mode", "peers", "upload_rate_profile", "upload_min_kbps", "upload_max_kbps", "download_rate_profile", "download_min_kbps", "download_max_kbps", "partial_availability_percent", "piece_strategy", "follow_tracker", "activity_pattern"];
 
+/// Settings that used to be in the global form. They are chosen per torrent now (or are fixed), so values an older
+/// version saved are ignored: a forgotten "off" must not outlive the form that set it.
+const RETIRED: [&str; 17] = ["default_mode", "default_peer_count", "peer_count_max", "partial_availability_percent", "piece_strategy", "follow_tracker", "activity_pattern", "upload_rate_profile", "upload_min_kbps", "upload_max_kbps", "download_rate_profile", "download_min_kbps", "download_max_kbps", "persist_counters", "send_started_event", "scrape_enabled", "scrape_interval_ms"];
+
 fn text<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
     v.get(k)?.as_str().map(str::trim).filter(|s| !s.is_empty())
 }
@@ -293,6 +297,15 @@ impl Settings {
         m
     }
 
+    /// The settings Drift hands over at start, minus what is no longer asked for there.
+    pub fn from_host(v: &Value) -> Self {
+        let mut m = v.as_object().cloned().unwrap_or_default();
+        for k in RETIRED {
+            m.remove(k);
+        }
+        Self::from_json(&Value::Object(m))
+    }
+
     pub fn from_json(v: &Value) -> Self {
         Self {
             raw: v.clone(),
@@ -384,6 +397,14 @@ mod tests {
         assert_eq!((o["mode"].as_str(), o["upload_min_kbps"].as_u64(), o["piece_strategy"].as_str(), o["activity_pattern"].as_bool()), (Some("partial_seed"), Some(50), Some("endgame_bias"), Some(true)));
         let back = Settings::from_json(&Value::Object(g.for_torrent(&o).raw.as_object().unwrap().clone()));
         assert_eq!((back.default_mode, back.upload.min_bps, back.piece_strategy), (g.default_mode, g.upload.min_bps, g.piece_strategy));
+    }
+
+    #[test]
+    fn values_an_older_form_saved_are_ignored() {
+        let s = Settings::from_host(&json!({"follow_tracker": false, "send_started_event": false, "persist_counters": false, "default_peer_count": 9, "upload_max_kbps": 5, "stealth_level": "basic"}));
+        assert!(s.follow_tracker && s.send_started && s.persist_counters && s.default_peer_count == 1);
+        assert_eq!(s.upload.max_bps, 800.0 * 1024.0);
+        assert_eq!(s.stealth, Stealth::Basic, "what is still asked for is kept");
     }
 
     #[test]

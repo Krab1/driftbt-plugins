@@ -49,7 +49,7 @@ fn main() {
         let id = msg.id.clone().unwrap_or(Value::Null);
         let reply = match msg.method.as_str() {
             "initialize" => {
-                let mut settings = Settings::from_json(&msg.params["settings"]);
+                let mut settings = Settings::from_host(&msg.params["settings"]);
                 log::set_level(&settings.log_level);
                 if sim.is_none() {
                     let api_key = rpc::ask_secret(&mut lines, &mut later, "tracker_api_key");
