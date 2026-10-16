@@ -1,7 +1,7 @@
 {
   "id": "tracker-sim",
   "name": "Tracker Simulator",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "api": 1,
   "kinds": [
     "simulator"
@@ -93,13 +93,15 @@
       "key": "follow_tracker",
       "label": "Follow tracker data",
       "type": "bool",
-      "help": "On by default. Uses the tracker's announce interval (never announcing sooner than its minimum), uploads little or nothing when the tracker reports no leechers and downloads nothing when it reports no seeders (our own peers are not counted), and waits longer after a refusal. Off: fixed interval and the speeds below."
+      "help": "On by default. Uses the tracker's announce interval (never announcing sooner than its minimum), uploads little or nothing when the tracker reports no leechers and downloads nothing when it reports no seeders (our own peers are not counted), and waits longer after a refusal. Off: fixed interval and the speeds below.",
+      "default": true
     },
     {
       "key": "activity_pattern",
       "label": "Daily activity pattern",
       "type": "bool",
-      "help": "Scales the speeds below by a daily curve (quiet at night) and a slow day-to-day drift, different for each peer. The min and max below are for full activity."
+      "help": "Scales the speeds below by a daily curve (quiet at night) and a slow day-to-day drift, different for each peer. The min and max below are for full activity.",
+      "default": true
     },
     {
       "key": "upload_rate_profile",
@@ -141,19 +143,22 @@
       "key": "persist_counters",
       "label": "Keep counters across restarts",
       "type": "bool",
-      "help": "On by default. Switch it off to start from zero every time (logged)."
+      "help": "On by default. Switch it off to start from zero every time (logged).",
+      "default": true
     },
     {
       "key": "send_started_event",
       "label": "Send the started event",
       "type": "bool",
-      "help": "On by default."
+      "help": "On by default.",
+      "default": true
     },
     {
       "key": "scrape_enabled",
       "label": "Scrape the tracker",
       "type": "bool",
-      "help": "Also ask for the torrent's scrape now and then."
+      "help": "Also ask for the torrent's scrape now and then.",
+      "default": false
     },
     {
       "key": "scrape_interval_ms",
