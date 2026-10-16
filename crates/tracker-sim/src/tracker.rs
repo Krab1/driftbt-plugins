@@ -309,3 +309,35 @@ mod tests {
         assert!(parse_answer(b"d8:interval").is_err());
     }
 }
+
+/// What each client profile puts on the wire, written out in full. A change to a profile or to the URL builder that
+/// alters a request fails here, so it can't happen by accident; change the expected strings on purpose.
+#[cfg(test)]
+mod golden {
+    use super::*;
+    use crate::profiles;
+
+    fn request(profile: &str, event: Option<&str>) -> (String, String) {
+        let p = profiles::resolve(profile, "", "");
+        let h = hash_bytes(&format!("{}{}", "0123456789abcdef".repeat(2), "f0".repeat(4))).unwrap();
+        let params = Params { info_hash: &h, peer_id: &format!("{}abcdefghijkl", p.prefix), port: 51413, uploaded: 1000, downloaded: 0, left: 0, num_want: p.num_want, event, key: "AB12CD34", tracker_id: None, transmission_style: p.transmission_query };
+        (announce_url("http://t.example/announce", &params, HashEncoding::Raw, ""), p.user_agent)
+    }
+
+    #[test]
+    fn qbittorrent_and_deluge_announce_like_libtorrent() {
+        let (u, ua) = request("qbittorrent", Some("started"));
+        assert_eq!(ua, "qBittorrent/4.6.5");
+        assert_eq!(u, "http://t.example/announce?info_hash=%01%23Eg%89%AB%CD%EF%01%23Eg%89%AB%CD%EF%F0%F0%F0%F0&peer_id=-qB4650-abcdefghijkl&port=51413&uploaded=1000&downloaded=0&left=0&key=AB12CD34&event=started&numwant=200&compact=1&no_peer_id=1&supportcrypto=1");
+        let (u, ua) = request("deluge", None);
+        assert_eq!(ua, "Deluge/2.1.1 libtorrent/2.0.9.0");
+        assert_eq!(u, "http://t.example/announce?info_hash=%01%23Eg%89%AB%CD%EF%01%23Eg%89%AB%CD%EF%F0%F0%F0%F0&peer_id=-DE211s-abcdefghijkl&port=51413&uploaded=1000&downloaded=0&left=0&key=AB12CD34&numwant=200&compact=1&no_peer_id=1&supportcrypto=1");
+    }
+
+    #[test]
+    fn transmission_orders_its_parameters_its_own_way() {
+        let (u, ua) = request("transmission", Some("stopped"));
+        assert_eq!(ua, "Transmission/4.0.4");
+        assert_eq!(u, "http://t.example/announce?info_hash=%01%23Eg%89%AB%CD%EF%01%23Eg%89%AB%CD%EF%F0%F0%F0%F0&peer_id=-TR4040-abcdefghijkl&port=51413&uploaded=1000&downloaded=0&left=0&numwant=80&key=AB12CD34&compact=1&supportcrypto=1&event=stopped");
+    }
+}
