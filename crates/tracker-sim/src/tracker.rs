@@ -14,6 +14,8 @@ pub struct Params<'a> {
     pub num_want: u32,
     pub event: Option<&'a str>,
     pub key: &'a str,
+    /// The tracker's own id for us (percent-encoded), echoed back as `trackerid`.
+    pub tracker_id: Option<&'a str>,
     /// Parameter order and set of a Transmission client instead of a libtorrent one.
     pub transmission_style: bool,
 }
@@ -63,7 +65,10 @@ pub fn announce_url(base: &str, p: &Params, enc: HashEncoding, extra: &str) -> S
         p.downloaded,
         p.left
     );
-    let event = p.event.map(|e| format!("&event={e}")).unwrap_or_default();
+    let mut event = p.event.map(|e| format!("&event={e}")).unwrap_or_default();
+    if let Some(t) = p.tracker_id {
+        event.push_str(&format!("&trackerid={t}"));
+    }
     let mut q = if p.transmission_style {
         format!("{head}&numwant={}&key={}&compact=1&supportcrypto=1{event}", p.num_want, p.key)
     } else {
@@ -93,27 +98,89 @@ pub fn scrape_url(base: &str, info_hash: &[u8; 20], enc: HashEncoding, extra: &s
     Some(format!("{}scrape{tail}?{q}", &path[..=slash]))
 }
 
-#[derive(Debug, PartialEq)]
+/// What a tracker told us in an announce reply. Everything but a refusal is optional.
+#[derive(Debug, PartialEq, Default)]
 pub struct Answer {
     pub interval: Option<u64>,
+    pub min_interval: Option<u64>,
+    /// Seeders and leechers on the torrent, our own peers included.
+    pub complete: Option<u64>,
+    pub incomplete: Option<u64>,
+    pub warning: Option<String>,
+    /// Percent-encoded, ready to send back.
+    pub tracker_id: Option<String>,
+}
+
+impl Answer {
+    /// Combines the answers of several trackers: the first value of each field, the largest minimum interval.
+    pub fn merge(&mut self, o: Answer) {
+        self.interval = self.interval.or(o.interval);
+        self.min_interval = self.min_interval.max(o.min_interval);
+        self.complete = self.complete.or(o.complete);
+        self.incomplete = self.incomplete.or(o.incomplete);
+        self.warning = self.warning.take().or(o.warning);
+        self.tracker_id = self.tracker_id.take().or(o.tracker_id);
+    }
+}
+
+/// The start of the error for a reply with a `failure reason`.
+const REFUSED: &str = "tracker refused";
+
+pub fn is_refusal(error: &str) -> bool {
+    error.starts_with(REFUSED)
 }
 
 /// Reads just the top-level `failure reason` and `interval` of a bencoded answer.
 pub fn parse_answer(body: &[u8]) -> Result<Answer, String> {
     let mut p = Bencode { b: body, i: 0 };
     p.expect(b'd')?;
-    let (mut interval, mut failure) = (None, None);
+    let (mut a, mut failure) = (Answer::default(), None);
     while p.peek()? != b'e' {
         match p.bytes()? {
             b"failure reason" => failure = Some(String::from_utf8_lossy(p.bytes()?).into_owned()),
-            b"interval" => interval = Some(p.int()?.max(0) as u64),
+            b"interval" => a.interval = p.opt_int()?,
+            b"min interval" => a.min_interval = p.opt_int()?,
+            b"complete" => a.complete = p.opt_int()?,
+            b"incomplete" => a.incomplete = p.opt_int()?,
+            b"warning message" => a.warning = Some(String::from_utf8_lossy(p.bytes()?).chars().take(200).collect()),
+            b"tracker id" => a.tracker_id = Some(pct(p.bytes()?)),
             _ => p.skip(0)?,
         }
     }
     match failure {
-        Some(f) => Err(format!("tracker refused: {}", f.chars().take(200).collect::<String>())),
-        None => Ok(Answer { interval }),
+        Some(f) => Err(format!("{REFUSED}: {}", f.chars().take(200).collect::<String>())),
+        None => Ok(a),
     }
+}
+
+/// Seeders and leechers of one torrent from a scrape reply (`files` → info hash → `complete`, `incomplete`).
+pub fn parse_scrape(body: &[u8], info_hash: &[u8; 20]) -> Result<(Option<u64>, Option<u64>), String> {
+    let mut p = Bencode { b: body, i: 0 };
+    p.expect(b'd')?;
+    while p.peek()? != b'e' {
+        if p.bytes()? != b"files" {
+            p.skip(0)?;
+            continue;
+        }
+        p.expect(b'd')?;
+        while p.peek()? != b'e' {
+            if p.bytes()? != info_hash {
+                p.skip(0)?;
+                continue;
+            }
+            p.expect(b'd')?;
+            let (mut complete, mut incomplete) = (None, None);
+            while p.peek()? != b'e' {
+                match p.bytes()? {
+                    b"complete" => complete = p.opt_int()?,
+                    b"incomplete" => incomplete = p.opt_int()?,
+                    _ => p.skip(0)?,
+                }
+            }
+            return Ok((complete, incomplete));
+        }
+    }
+    Err("the scrape reply doesn't list this torrent".into())
 }
 
 struct Bencode<'a> {
@@ -140,6 +207,15 @@ impl<'a> Bencode<'a> {
         let n = std::str::from_utf8(&self.b[self.i..self.i + end]).ok().and_then(|s| s.parse().ok()).ok_or("bad integer")?;
         self.i += end + 1;
         Ok(n)
+    }
+
+    /// An integer, or `None` (the value is skipped) if the tracker sent something else there.
+    fn opt_int(&mut self) -> Result<Option<u64>, String> {
+        if self.peek()? == b'i' {
+            Ok(Some(self.int()?.max(0) as u64))
+        } else {
+            self.skip(0).map(|()| None)
+        }
     }
 
     fn bytes(&mut self) -> Result<&'a [u8], String> {
@@ -186,14 +262,27 @@ mod tests {
     #[test]
     fn announce_url_encodes_raw_bytes_once() {
         let h = hash_bytes(&format!("ab01{}", "ff".repeat(18))).unwrap();
-        let p = Params { info_hash: &h, peer_id: "-qB4650-abcdefghijkl", port: 51413, uploaded: 5, downloaded: 6, left: 7, num_want: 200, event: Some("started"), key: "AB12CD34", transmission_style: false };
+        let p = Params { info_hash: &h, peer_id: "-qB4650-abcdefghijkl", port: 51413, uploaded: 5, downloaded: 6, left: 7, num_want: 200, event: Some("started"), key: "AB12CD34", tracker_id: Some("t%201"), transmission_style: false };
         let u = announce_url("http://t.example/announce?passkey=k", &p, HashEncoding::Raw, "apikey=z");
         assert!(u.starts_with("http://t.example/announce?passkey=k&info_hash=%AB%01%FF"), "{u}");
         assert!(u.contains("peer_id=-qB4650-abcdefghijkl&port=51413&uploaded=5&downloaded=6&left=7"));
-        assert!(u.contains("&event=started&numwant=200&compact=1") && u.ends_with("&apikey=z"));
+        assert!(u.contains("&event=started&trackerid=t%201&numwant=200") && u.ends_with("&apikey=z"));
         assert!(announce_url("http://t/announce", &p, HashEncoding::Hex, "").contains("info_hash=ab01ffff"));
         let tr = announce_url("http://t/announce", &Params { transmission_style: true, ..p }, HashEncoding::Raw, "");
         assert!(tr.contains("&left=7&numwant=200&key=AB12CD34&compact=1&supportcrypto=1&event=started") && !tr.contains("no_peer_id"), "{tr}");
+    }
+
+    #[test]
+    fn scrape_replies() {
+        let h = [7u8; 20];
+        let mut body = b"d5:filesd20:".to_vec();
+        body.extend_from_slice(&[1u8; 20]);
+        body.extend_from_slice(b"d8:completei9ee20:");
+        body.extend_from_slice(&h);
+        body.extend_from_slice(b"d8:completei4e10:downloadedi8e10:incompletei2eeee");
+        assert_eq!(parse_scrape(&body, &h), Ok((Some(4), Some(2))));
+        assert!(parse_scrape(&body, &[9u8; 20]).is_err());
+        assert!(parse_scrape(b"d5:flagsdee", &h).is_err());
     }
 
     #[test]
@@ -206,8 +295,15 @@ mod tests {
 
     #[test]
     fn answers() {
-        assert_eq!(parse_answer(b"d8:intervali1800e5:peers0:e"), Ok(Answer { interval: Some(1800) }));
-        assert_eq!(parse_answer(b"d5:peersl3:abce8:intervali60ee"), Ok(Answer { interval: Some(60) }));
+        assert_eq!(parse_answer(b"d8:intervali1800e5:peers0:e"), Ok(Answer { interval: Some(1800), ..Default::default() }));
+        assert_eq!(parse_answer(b"d5:peersl3:abce8:intervali60ee"), Ok(Answer { interval: Some(60), ..Default::default() }));
+        let full = parse_answer(b"d8:completei3e10:incompletei7e8:intervali1800e12:min intervali900e15:warning message4:slow10:tracker id3:a b5:peers0:e").unwrap();
+        assert_eq!((full.complete, full.incomplete, full.interval, full.min_interval), (Some(3), Some(7), Some(1800), Some(900)));
+        assert_eq!((full.warning.as_deref(), full.tracker_id.as_deref()), (Some("slow"), Some("a%20b")));
+        assert_eq!(parse_answer(b"d8:complete3:abc8:intervali60ee").unwrap().complete, None, "a value of the wrong kind is ignored");
+        let mut m = Answer { interval: Some(60), min_interval: Some(30), ..Default::default() };
+        m.merge(Answer { interval: Some(99), min_interval: Some(45), complete: Some(2), ..Default::default() });
+        assert_eq!((m.interval, m.min_interval, m.complete), (Some(60), Some(45), Some(2)));
         assert!(parse_answer(b"d14:failure reason7:bad bote").unwrap_err().contains("bad bot"));
         assert!(parse_answer(b"<html>").is_err());
         assert!(parse_answer(b"d8:interval").is_err());

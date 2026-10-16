@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -15,13 +16,14 @@ use tokio::task::JoinHandle;
 
 use crate::activity;
 use crate::identity::Identity;
-use crate::peer::Peer;
+use crate::demand::Swarm as Demand;
+use crate::peer::{Hint, Peer};
 use crate::profiles::{self, Profile};
 use crate::proxy;
 use crate::settings::{Mode, ProxyMode, Settings};
 use crate::swarm::{Content, Node, NodeCfg, Swarm};
 use crate::state::{now_iso, Store, TorrentSel};
-use crate::tracker::{self, Params};
+use crate::tracker::{self, Answer, Params};
 
 /// How often a peer advances its counters.
 const TICK: Duration = Duration::from_millis(200);
@@ -273,6 +275,7 @@ impl Sim {
         };
         let lo = (mode == Mode::LoopbackPair).then(|| Arc::new(LoopCtx { swarm: tokio::sync::OnceCell::new(), ids: ids.clone(), had }));
         let mut handles = Vec::new();
+        let own = Arc::new(Own::default());
         let mut taken: Vec<usize> = Vec::new();
         for (i, id) in ids.into_iter().enumerate() {
             let saved_proxy = if s.proxy_mode == ProxyMode::PerPeer { id.proxy_id.as_deref() } else { None };
@@ -296,7 +299,7 @@ impl Sim {
             };
             lock(&self.shared.store).set_proxy(i, def.filter(|_| s.proxy_mode == ProxyMode::PerPeer).map(|d| d.id.clone()));
             info!("{} uses {}", id.identity_id, def.map_or("a direct connection", |d| d.id.as_str()));
-            handles.push(self.rt.spawn(run_peer(self.shared.clone(), client, hash.to_string(), id, mode, lo.clone().map(|c| (c, i)), gate.clone(), rx.clone())));
+            handles.push(self.rt.spawn(run_peer(self.shared.clone(), client, hash.to_string(), id, mode, lo.clone().map(|c| (c, i)), gate.clone(), own.clone(), rx.clone())));
         }
         let name = self.shared.torrent(hash).map(|t| t.name).unwrap_or_default();
         info!("simulation started info_hash={hash} name={name:?} mode={} peers={peers}", mode.name());
@@ -336,8 +339,40 @@ async fn until_stop(stop: &mut watch::Receiver<bool>) {
 
 enum Outcome {
     NoTracker,
-    Done(Option<u64>),
+    Done(Answer),
     Failed(String),
+}
+
+/// How many of a torrent's own peers are currently seeding and downloading, so the tracker's counts (which include
+/// them) can be turned into the demand from everyone else.
+#[derive(Default)]
+struct Own {
+    seeders: AtomicU32,
+    leechers: AtomicU32,
+}
+
+impl Own {
+    /// Records what one peer is now (`None` once it has left); `was` is what it was counted as before.
+    fn set(&self, was: &mut Option<bool>, now: Option<bool>) {
+        if *was == now {
+            return;
+        }
+        let slot = |seed: bool| if seed { &self.seeders } else { &self.leechers };
+        if let Some(w) = *was {
+            slot(w).fetch_sub(1, Relaxed);
+        }
+        if let Some(n) = now {
+            slot(n).fetch_add(1, Relaxed);
+        }
+        *was = now;
+    }
+}
+
+/// Applies what the tracker said about seeders and leechers to a peer's speeds.
+fn apply_demand(peer: &mut Peer, own: &Own, complete: Option<u64>, incomplete: Option<u64>) {
+    let d = Demand::from_counts(complete, incomplete, u64::from(own.seeders.load(Relaxed)), u64::from(own.leechers.load(Relaxed)));
+    debug!("demand identity={} seeders={:?} leechers={:?} upload_x{:.2} download_x{:.2}", peer.identity.identity_id, d.seeders, d.leechers, d.upload_factor(), d.download_factor());
+    peer.set_demand(d.upload_factor(), d.download_factor());
 }
 
 /// Scheme and host only, for logs (the full address may hold a passkey).
@@ -366,17 +401,18 @@ async fn announce_round(sh: &Shared, client: &reqwest::Client, hash: &str, ih: &
         num_want: if event == Some("stopped") { 0 } else { profile.num_want },
         event,
         key: &peer.identity.key,
+        tracker_id: peer.tracker_id.as_deref(),
         transmission_style: profile.transmission_query,
     };
     debug!("announce identity={} uploaded={} downloaded={} left={} event={}", peer.identity.identity_id, p.uploaded, p.downloaded, p.left, event.unwrap_or("none"));
-    let (mut interval, mut ok, mut last_err) = (None, false, String::new());
+    let (mut merged, mut ok, mut last_err) = (Answer::default(), false, String::new());
     for t in &trackers {
         let url = tracker::announce_url(t, &p, sh.settings.info_hash_encoding, &sh.extra);
         let answer = tokio::time::timeout(per_tracker, tracker::get(client, &url, &profile.user_agent)).await.unwrap_or_else(|_| Err("timed out".into()));
         match answer.and_then(|b| tracker::parse_answer(&b)) {
             Ok(a) => {
                 ok = true;
-                interval = interval.or(a.interval);
+                merged.merge(a);
             }
             Err(e) => {
                 warn!("announce failed identity={} tracker={} {e}", peer.identity.identity_id, origin(t));
@@ -385,19 +421,22 @@ async fn announce_round(sh: &Shared, client: &reqwest::Client, hash: &str, ih: &
         }
     }
     if ok {
-        Outcome::Done(interval)
+        Outcome::Done(merged)
     } else {
         Outcome::Failed(last_err)
     }
 }
 
-async fn scrape_round(sh: &Shared, client: &reqwest::Client, hash: &str, ih: &[u8; 20], profile: &Profile) {
+/// Scrapes the torrent's trackers; the seeder and leecher counts of the first that answers.
+async fn scrape_round(sh: &Shared, client: &reqwest::Client, hash: &str, ih: &[u8; 20], profile: &Profile) -> Option<(Option<u64>, Option<u64>)> {
     for t in http_trackers(sh, hash) {
         let Some(url) = tracker::scrape_url(&t, ih, sh.settings.info_hash_encoding, &sh.extra) else { continue };
-        if let Err(e) = tracker::get(client, &url, &profile.user_agent).await {
-            debug!("scrape failed tracker={} {e}", origin(&t));
+        match tracker::get(client, &url, &profile.user_agent).await.and_then(|b| tracker::parse_scrape(&b, ih)) {
+            Ok(counts) => return Some(counts),
+            Err(e) => debug!("scrape failed tracker={} {e}", origin(&t)),
         }
     }
+    None
 }
 
 fn flush(sh: &Shared, key: &str, peer: &Peer) {
@@ -410,7 +449,7 @@ fn flush(sh: &Shared, key: &str, peer: &Peer) {
 
 /// One simulated peer of one torrent, from start to stop.
 #[allow(clippy::too_many_arguments)] // started from one place; a bundle struct would only rename the arguments
-async fn run_peer(sh: Arc<Shared>, client: reqwest::Client, hash: String, id: Identity, mode: Mode, lo: Option<(Arc<LoopCtx>, usize)>, mut gate: watch::Receiver<bool>, mut stop: watch::Receiver<bool>) {
+async fn run_peer(sh: Arc<Shared>, client: reqwest::Client, hash: String, id: Identity, mode: Mode, lo: Option<(Arc<LoopCtx>, usize)>, mut gate: watch::Receiver<bool>, own: Arc<Own>, mut stop: watch::Receiver<bool>) {
     let s = &sh.settings;
     // A previous run of this torrent is still saying goodbye: its final counters must be saved first.
     while !*gate.borrow() {
@@ -450,6 +489,7 @@ async fn run_peer(sh: Arc<Shared>, client: reqwest::Client, hash: String, id: Id
     let first = Instant::now() + peer.initial_delay(s.start_delay_max_ms);
     let (mut next, mut next_scrape) = (first, first + peer.jittered(s.scrape_interval_ms));
     let (mut started, mut fails, mut last) = (false, 0u32, Instant::now());
+    let (mut counted, mut last_warning): (Option<bool>, Option<String>) = (None, None);
     let mut next_activity = Instant::now();
     loop {
         if sleep_or_stop(&mut stop, TICK).await {
@@ -486,14 +526,32 @@ async fn run_peer(sh: Arc<Shared>, client: reqwest::Client, hash: String, id: Id
             let round = announce_round(&sh, &client, &hash, &ih, &peer, &profile, event, ANNOUNCE_TIMEOUT);
             let outcome = tokio::select! { o = round => o, () = until_stop(&mut stop) => break };
             match outcome {
-                Outcome::Done(hint) => {
+                Outcome::Done(a) => {
                     started = true;
                     if let Some(n) = &node {
                         n.activate();
                     }
                     fails = 0;
                     peer.last_announce = Some(now_iso());
-                    next = Instant::now() + peer.announce_delay(hint.filter(|_| s.honor_tracker_interval).map(|i| i.clamp(10, 3600)));
+                    own.set(&mut counted, Some(peer.left() == 0));
+                    if let Some(w) = &a.warning {
+                        if last_warning.as_ref() != Some(w) {
+                            warn!("tracker warning identity={}: {w}", peer.identity.identity_id);
+                            last_warning = Some(w.clone());
+                        }
+                    }
+                    if a.tracker_id.is_some() {
+                        peer.tracker_id.clone_from(&a.tracker_id);
+                    }
+                    let mut hint = None;
+                    if s.follow_tracker {
+                        hint = (a.interval.is_some() || a.min_interval.is_some()).then(|| Hint { interval: a.interval.unwrap_or(0), min_interval: a.min_interval.unwrap_or(0) });
+                        // A loopback peer's speeds are real transfers, not set by the tracker's numbers.
+                        if node.is_none() && (a.complete.is_some() || a.incomplete.is_some()) {
+                            apply_demand(&mut peer, &own, a.complete, a.incomplete);
+                        }
+                    }
+                    next = Instant::now() + peer.announce_delay(hint);
                     flush(&sh, &key, &peer);
                 }
                 Outcome::NoTracker => {
@@ -507,17 +565,26 @@ async fn run_peer(sh: Arc<Shared>, client: reqwest::Client, hash: String, id: Id
                     if event == Some("completed") {
                         peer.rearm_completed();
                     }
-                    let retry = peer.retry_delay(fails);
+                    let mut retry = peer.retry_delay(fails);
+                    if tracker::is_refusal(&e) {
+                        // The tracker said no on purpose: don't hammer it.
+                        retry = retry.max(Duration::from_secs(60 * u64::from(fails.min(5))));
+                    }
                     warn!("tracker request failed identity={} {e} retry_ms={}", peer.identity.identity_id, retry.as_millis());
                     next = Instant::now() + retry;
                 }
             }
         }
         if s.scrape_enabled && started && Instant::now() >= next_scrape {
-            scrape_round(&sh, &client, &hash, &ih, &profile).await;
+            if let Some((c, i)) = scrape_round(&sh, &client, &hash, &ih, &profile).await {
+                if s.follow_tracker && node.is_none() {
+                    apply_demand(&mut peer, &own, c, i);
+                }
+            }
             next_scrape = Instant::now() + peer.jittered(s.scrape_interval_ms);
         }
     }
+    own.set(&mut counted, None);
     if started {
         let stopped = announce_round(&sh, &client, &hash, &ih, &peer, &profile, Some("stopped"), STOPPED_TRY_TIMEOUT);
         if tokio::time::timeout(STOP_ANNOUNCE_TIMEOUT, stopped).await.is_err() {

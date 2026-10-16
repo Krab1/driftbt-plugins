@@ -118,7 +118,11 @@ impl Store {
     /// number 2 of any torrent is always bot-002.
     pub fn identity(&mut self, index: usize, requested: &str, custom_prefix: &str) -> Identity {
         while self.state.identities.len() <= index {
-            let id = identity::generate(self.state.identities.len(), rng::entropy(), requested, custom_prefix);
+            let mut id = identity::generate(self.state.identities.len(), rng::entropy(), requested, custom_prefix);
+            // A tracker keys peers by address and port, so two identities sharing a port would be one peer to it.
+            while self.state.identities.iter().any(|o| o.port == id.port) {
+                id.port = if id.port == u16::MAX { 10_000 } else { id.port + 1 };
+            }
             info!("new identity {} peer_id={} port={} profile={}", id.identity_id, id.peer_id, id.port, id.client_profile);
             self.state.identities.push(id);
             self.save();
@@ -149,6 +153,13 @@ mod tests {
         let back = Store::load(path);
         assert_eq!(back.state, s.state);
         assert_eq!(back.state.identities[1], id);
+    }
+
+    #[test]
+    fn identities_never_share_a_port() {
+        let mut s = Store::load(temp("ports"));
+        let ports: std::collections::BTreeSet<u16> = (0..8).map(|i| s.identity(i, "transmission", "").port).collect();
+        assert_eq!(ports.len(), 8, "Transmission's fixed port 51413 must not repeat");
     }
 
     #[test]

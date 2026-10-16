@@ -1,7 +1,7 @@
 {
   "id": "tracker-sim",
   "name": "Tracker Simulator",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "api": 1,
   "kinds": [
     "simulator"
@@ -75,7 +75,7 @@
       "key": "announce_interval_base_ms",
       "label": "Announce interval (ms)",
       "type": "number",
-      "help": "Typical time between announces. Default: 30000."
+      "help": "Typical time between announces when the tracker gives no interval or Follow tracker data is off. Real trackers usually ask for 1800 s. Default: 30000."
     },
     {
       "key": "announce_jitter_percent",
@@ -90,10 +90,10 @@
       "help": "Each peer waits a random time up to this before its first announce. Default: 15000."
     },
     {
-      "key": "honor_tracker_interval",
-      "label": "Follow the tracker's interval",
+      "key": "follow_tracker",
+      "label": "Follow tracker data",
       "type": "bool",
-      "help": "Use the interval the tracker answers with instead of the one above."
+      "help": "On by default. Uses the tracker's announce interval (never announcing sooner than its minimum), uploads little or nothing when the tracker reports no leechers and downloads nothing when it reports no seeders (our own peers are not counted), and waits longer after a refusal. Off: fixed interval and the speeds below."
     },
     {
       "key": "activity_pattern",

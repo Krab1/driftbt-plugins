@@ -158,7 +158,8 @@ pub struct Settings {
     pub announce_base_ms: f64,
     pub jitter: f64,
     pub start_delay_max_ms: u64,
-    pub honor_tracker_interval: bool,
+    /// Use the tracker's interval and counts (see `demand.rs`).
+    pub follow_tracker: bool,
     pub upload: RateCfg,
     pub download: RateCfg,
     pub activity_pattern: bool,
@@ -250,7 +251,7 @@ impl Settings {
             announce_base_ms: num(v, "announce_interval_base_ms").unwrap_or(30_000.0).clamp(1000.0, 3_600_000.0),
             jitter: num(v, "announce_jitter_percent").unwrap_or(25.0).clamp(0.0, 90.0) / 100.0,
             start_delay_max_ms: num(v, "start_delay_max_ms").unwrap_or(15_000.0).clamp(0.0, 300_000.0) as u64,
-            honor_tracker_interval: flag(v, "honor_tracker_interval", false),
+            follow_tracker: flag(v, "follow_tracker", true),
             upload: rate(v, "upload", RateProfile::Bursty, 100.0, 800.0),
             download: rate(v, "download", RateProfile::RandomWalk, 20.0, 500.0),
             activity_pattern: flag(v, "activity_pattern", false),

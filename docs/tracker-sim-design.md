@@ -47,9 +47,25 @@ Personality (from the seed, so it survives restarts): rate scale, idle and burst
 
 ### Announce schedule (`peer.rs`)
 
-Per peer, independent: a random first delay (5-100 % of `start_delay_max_ms`), then `base × personality factor × (1 ± jitter)`, sometimes ×1.5-3. Minimum 1 s. Optionally the tracker's own `interval` replaces the base (`honor_tracker_interval`; off by default because test trackers answer with 1800 s). Failure: 2 s, 4 s, 8 s ... up to 5 min, ±20 %; a completed event that failed is re-armed. No tracker known: retry in 10 s without counting a failure.
+Per peer, independent: a random first delay (5-100 % of `start_delay_max_ms`), then the time to the next announce:
 
-Event sequence: `started` (first success; optional), none for periodic, `completed` once, `stopped`. All values are cumulative.
+- **Following the tracker** (`follow_tracker`, on by default): the tracker's `interval` (clamped to 10 s – 1 h), or its `min interval` if that is larger, plus a little: `interval × (1 + jitter × random × 0.5)`. Never earlier than asked, as a real client's timer would behave. About 5 % of gaps (at `high`) are stretched 1.5–3×.
+- **Otherwise** (no interval in the reply, or the option off): `base × peer habit × (1 ± jitter)`, sometimes ×1.5–3. Minimum 1 s.
+
+Failure: 2 s, 4 s, 8 s ... up to 5 min, ±20 %. A reply with a `failure reason` (a deliberate refusal) waits at least 60 s × the number of refusals in a row (up to 5 min). A completed event that failed is re-armed. No tracker known: retry in 10 s without counting a failure.
+
+Event sequence: `started` (first success; optional), none for periodic, `completed` once, `stopped`. All values are cumulative. If the tracker sent a `tracker id`, it is echoed as `trackerid`. A `warning message` is logged once per distinct text.
+
+### Tracker data (`demand.rs`, `follow_tracker`)
+
+The announce reply (and the scrape, when enabled) carries `complete` and `incomplete`: seeders and leechers on the torrent. They include our own peers, which are counted per torrent and subtracted. The rest is demand:
+
+- **Upload** (announce-only modes): no other leechers → the upload band is scaled to 0 (a seeder with nobody to serve uploads nothing). Otherwise the factor is `leechers / (other seeders + 1)`, between 0.05 and 1. It scales the configured min and max, so the speed profile's shape is kept.
+- **Download** (modes that download): no other seeders → stalled. 1 seeder → about 0.33, 3 or more → full.
+- Counts missing from a reply leave the speeds unchanged. In `loopback_pair` the speeds are real transfers and the tracker's numbers do not change them (the interval still applies).
+- Everything from the tracker is clamped; a huge number cannot make a peer misbehave.
+
+Verified against `bittorrent-tracker`: two seeders alone on a torrent read seeders 0 and leechers 0 after subtraction, and uploaded stayed 0.
 
 ### Rate engine (`rate.rs`)
 

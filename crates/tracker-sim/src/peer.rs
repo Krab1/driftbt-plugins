@@ -34,6 +34,18 @@ pub struct Peer {
     measured: bool,
     base_up: u64,
     base_down: u64,
+    activity: f64,
+    demand_up: f64,
+    demand_down: f64,
+    /// The tracker's id for this peer, sent back as `trackerid`.
+    pub tracker_id: Option<String>,
+}
+
+/// What the tracker asked for: announce every `interval` seconds, and never sooner than `min_interval`.
+#[derive(Debug, Clone, Copy)]
+pub struct Hint {
+    pub interval: u64,
+    pub min_interval: u64,
 }
 
 impl Peer {
@@ -64,6 +76,10 @@ impl Peer {
             measured: false,
             base_up: 0,
             base_down: 0,
+            activity: 1.0,
+            demand_up: 1.0,
+            demand_down: 1.0,
+            tracker_id: None,
             identity,
         }
     }
@@ -108,8 +124,19 @@ impl Peer {
     }
 
     pub fn set_activity(&mut self, f: f64) {
-        self.up.set_activity(f);
-        self.down.set_activity(f);
+        self.activity = f;
+        self.apply_bands();
+    }
+
+    /// Scales the speeds by what the tracker says about demand (see `demand.rs`).
+    pub fn set_demand(&mut self, up: f64, down: f64) {
+        (self.demand_up, self.demand_down) = (up, down);
+        self.apply_bands();
+    }
+
+    fn apply_bands(&mut self) {
+        self.up.set_activity(self.activity * self.demand_up);
+        self.down.set_activity(self.activity * self.demand_down);
     }
 
     /// True once, after the download finished; the next announce carries `event=completed`.
@@ -137,8 +164,18 @@ impl Peer {
 
     /// Time to the next announce: the base (or the tracker's own interval) with this peer's habits and jitter,
     /// now and then stretched.
-    pub fn announce_delay(&mut self, tracker_interval: Option<u64>) -> Duration {
-        self.jittered(tracker_interval.map_or(self.base_ms, |s| s as f64 * 1000.0))
+    pub fn announce_delay(&mut self, hint: Option<Hint>) -> Duration {
+        let Some(h) = hint else { return self.jittered(self.base_ms) };
+        if h.interval == 0 {
+            return self.jittered(self.base_ms.max(h.min_interval.min(3600) as f64 * 1000.0));
+        }
+        // A client waits the interval it was given and wakes up a little after, never before.
+        let secs = h.interval.clamp(10, 3600).max(h.min_interval.min(3600));
+        let mut ms = secs as f64 * 1000.0 * (1.0 + self.jitter * self.rng.f64() * 0.5);
+        if self.rng.f64() < self.stealth.long_gap_p() {
+            ms *= self.rng.range(1.5, 3.0);
+        }
+        Duration::from_millis(ms as u64)
     }
 
     /// `ms` scaled by this peer's habit and jitter (used for scrapes too), now and then stretched.
@@ -228,6 +265,29 @@ mod tests {
         assert!(da.windows(2).any(|w| w[0] != w[1]), "not periodic");
         assert_ne!(da, db);
         assert!(da.iter().chain(&db).all(|d| d.as_secs() >= 10 && d.as_secs() <= 120), "{da:?}");
+    }
+
+    #[test]
+    fn following_the_tracker_never_announces_early() {
+        let mut p = peer(Mode::SeedOnly, 1, 21, json!({"stealth_level": "maximum"}));
+        let hint = Some(Hint { interval: 1800, min_interval: 1200 });
+        let d: Vec<_> = (0..200).map(|_| p.announce_delay(hint)).collect();
+        assert!(d.iter().all(|x| x.as_secs() >= 1800), "not before the interval");
+        assert!(d.iter().any(|x| x.as_secs() > 1850), "but a little after, and not always the same");
+        let only_min = p.announce_delay(Some(Hint { interval: 0, min_interval: 3000 }));
+        assert!(only_min.as_secs() >= 2000, "a bare minimum still holds the peer back: {only_min:?}");
+        assert!((0..50).all(|_| p.announce_delay(Some(Hint { interval: 1, min_interval: 0 })).as_secs() >= 10), "absurdly short intervals are clamped");
+    }
+
+    #[test]
+    fn demand_scales_the_speeds() {
+        let mut p = peer(Mode::SeedOnly, 1 << 40, 22, json!({}));
+        p.set_demand(0.0, 1.0);
+        (0..100).for_each(|_| p.step(0.1));
+        assert_eq!(p.uploaded, 0, "no leechers, no upload");
+        p.set_demand(1.0, 1.0);
+        (0..100).for_each(|_| p.step(0.1));
+        assert!(p.uploaded > 0);
     }
 
     #[test]

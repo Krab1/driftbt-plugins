@@ -5,6 +5,7 @@
 #[macro_use]
 mod log;
 mod activity;
+mod demand;
 mod identity;
 mod jobs;
 mod peer;

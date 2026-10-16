@@ -78,6 +78,10 @@ impl Hit {
 
 /// A tracker that answers every announce with an empty peer list and reports what it was asked.
 fn stub_tracker() -> (u16, mpsc::Receiver<Hit>) {
+    stub_tracker_saying("d8:intervali1800e5:peers0:e")
+}
+
+fn stub_tracker_saying(body: &'static str) -> (u16, mpsc::Receiver<Hit>) {
     let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = l.local_addr().unwrap().port();
     let (tx, rx) = mpsc::channel();
@@ -90,7 +94,6 @@ fn stub_tracker() -> (u16, mpsc::Receiver<Hit>) {
             let query = first.split(' ').nth(1).and_then(|t| t.split_once('?')).map_or("", |(_, q)| q).to_string();
             let query = query.split('&').filter_map(|p| p.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
             let _ = tx.send(Hit { at: Instant::now(), query });
-            let body = "d8:intervali1800e5:peers0:e";
             let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
         }
     });
@@ -115,7 +118,7 @@ fn torrent(hash: &str, port: u16) -> Value {
 
 fn settings(dir: &std::path::Path) -> Value {
     json!({"data_dir": dir.to_string_lossy(), "announce_interval_base_ms": 1500, "announce_jitter_percent": 30, "start_delay_max_ms": 800,
-           "upload_rate_profile": "constant_jitter", "upload_min_kbps": 200, "upload_max_kbps": 400, "log_level": "debug"})
+           "upload_rate_profile": "constant_jitter", "upload_min_kbps": 200, "upload_max_kbps": 400, "log_level": "debug", "follow_tracker": false})
 }
 
 #[test]
@@ -264,4 +267,40 @@ fn loopback_pair_announces_bytes_that_really_moved() {
     assert!(leech.windows(2).all(|w| w[1].n("left") <= w[0].n("left") && w[1].n("downloaded") >= w[0].n("downloaded")));
     assert!(seed.last().unwrap().n("uploaded") >= TOTAL, "the seeder uploaded what the leecher received");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Runs one peer against a stub tracker that answers `body`, with Follow tracker data on; returns what it announced.
+fn follow_run(body: &'static str, secs: u64) -> Vec<Hit> {
+    let dir = std::env::temp_dir().join(format!("tracker-sim-follow-{}-{}", std::process::id(), body.len()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (port, rx) = stub_tracker_saying(body);
+    let mut cfg = settings(&dir);
+    cfg["follow_tracker"] = json!(true);
+    cfg["stealth_level"] = json!("basic"); // no stretched gaps, so the timing below is predictable
+    let mut p = Plugin::start();
+    p.call(1, "initialize", json!({"api": 1, "app_version": "1", "settings": cfg}));
+    let t = torrent(HASH, port);
+    p.send(json!({"jsonrpc": "2.0", "method": "torrents_updated", "params": {"torrents": [t.clone()]}}));
+    p.call(2, "selection_changed", json!({"info_hash": HASH, "enabled": true, "torrent": t}));
+    let hits = drain(&rx, Duration::from_secs(secs));
+    p.finish();
+    let _ = std::fs::remove_dir_all(&dir);
+    hits
+}
+
+#[test]
+fn follows_the_trackers_interval_and_uploads_nothing_when_nobody_is_downloading() {
+    // 1 seeder (us) and 0 leechers, asked to come back in 10 s
+    let hits = follow_run("d8:completei1e10:incompletei0e8:intervali10e12:min intervali10e5:peers0:e", 14);
+    let times: Vec<_> = hits.iter().filter(|h| h.event() != "stopped").collect();
+    assert!(times.len() >= 2, "got {} announces", times.len());
+    assert!(times.windows(2).all(|w| w[1].at.duration_since(w[0].at) >= Duration::from_millis(9800)), "never sooner than the interval");
+    assert!(times.iter().all(|h| h.n("uploaded") == 0), "nobody to upload to: {:?}", times.iter().map(|h| h.n("uploaded")).collect::<Vec<_>>());
+}
+
+#[test]
+fn uploads_when_the_tracker_reports_leechers() {
+    let hits = follow_run("d8:completei1e10:incompletei5e8:intervali10e5:peers0:e", 14);
+    let ups: Vec<u64> = hits.iter().filter(|h| h.event() != "stopped").map(|h| h.n("uploaded")).collect();
+    assert!(ups.len() >= 2 && ups[0] == 0 && ups[1] > 500_000, "five leechers: {ups:?}");
 }
