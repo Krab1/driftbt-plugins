@@ -1,0 +1,230 @@
+{
+  "id": "tracker-sim",
+  "name": "Tracker Simulator",
+  "version": "0.1.0",
+  "api": 1,
+  "kinds": [
+    "simulator"
+  ],
+  "description": "Per-torrent stealth seeding simulator for testing a tracker and its anti-bot checks. For torrents you switch on in the torrent's menu, it announces to their trackers as stable, human-looking peers whose uploaded and downloaded counters grow gradually. Use it only against trackers you operate or have permission to test. It does not transfer any data.",
+  "exec": [
+    "tracker-sim.exe"
+  ],
+  "permissions": {
+    "net": [
+      "*"
+    ],
+    "fs": []
+  },
+  "settings": [
+    {
+      "key": "stealth_level",
+      "label": "Stealth level",
+      "type": "text",
+      "help": "basic, medium, high or maximum. More irregularity in announce timing and between peers. Default: high."
+    },
+    {
+      "key": "client_profile",
+      "label": "Client profile",
+      "type": "text",
+      "help": "auto, qbittorrent_like, transmission_like, deluge_like, custom or debug_obvious (an obvious -DRSIM0- peer id, for finding the bots in tracker logs). Default: auto. A peer keeps the profile it was created with."
+    },
+    {
+      "key": "custom_peer_id_prefix",
+      "label": "Custom peer id prefix",
+      "type": "text",
+      "help": "Up to 8 characters, for the custom profile, for example -XX0100-."
+    },
+    {
+      "key": "custom_user_agent",
+      "label": "Custom user agent",
+      "type": "text",
+      "help": "For the custom profile."
+    },
+    {
+      "key": "default_mode",
+      "label": "Default mode",
+      "type": "text",
+      "help": "seed_only, partial_seed, download_and_seed or loopback_pair (the peers move real, checked data between themselves on this computer; needs 2 or more peers). Applied when a torrent is switched on. Default: seed_only."
+    },
+    {
+      "key": "default_peer_count",
+      "label": "Default peer count",
+      "type": "number",
+      "help": "Simulated peers per torrent, 1 to 20. Default: 1."
+    },
+    {
+      "key": "partial_availability_percent",
+      "label": "Partial seed share (%)",
+      "type": "number",
+      "help": "How much of the torrent a partial_seed peer starts with. Default: 50."
+    },
+    {
+      "key": "piece_strategy",
+      "label": "Piece strategy",
+      "type": "text",
+      "help": "For loopback_pair: sequential, random, rarest_first or endgame_bias (rarest first, and duplicate requests for the last pieces). Default: rarest_first."
+    },
+    {
+      "key": "announce_interval_base_ms",
+      "label": "Announce interval (ms)",
+      "type": "number",
+      "help": "Typical time between announces. Default: 30000."
+    },
+    {
+      "key": "announce_jitter_percent",
+      "label": "Announce jitter (%)",
+      "type": "number",
+      "help": "How far each gap may stray from the interval. Default: 25."
+    },
+    {
+      "key": "start_delay_max_ms",
+      "label": "Longest first delay (ms)",
+      "type": "number",
+      "help": "Each peer waits a random time up to this before its first announce. Default: 15000."
+    },
+    {
+      "key": "honor_tracker_interval",
+      "label": "Follow the tracker's interval",
+      "type": "bool",
+      "help": "Use the interval the tracker answers with instead of the one above."
+    },
+    {
+      "key": "activity_pattern",
+      "label": "Daily activity pattern",
+      "type": "bool",
+      "help": "Scales the speeds below by a daily curve (quiet at night) and a slow day-to-day drift, different for each peer. The min and max below are for full activity."
+    },
+    {
+      "key": "upload_rate_profile",
+      "label": "Upload rate profile",
+      "type": "text",
+      "help": "constant_jitter, random_walk or bursty. Default: bursty."
+    },
+    {
+      "key": "upload_min_kbps",
+      "label": "Upload min (KB/s)",
+      "type": "number",
+      "help": "Default: 100."
+    },
+    {
+      "key": "upload_max_kbps",
+      "label": "Upload max (KB/s)",
+      "type": "number",
+      "help": "Default: 800."
+    },
+    {
+      "key": "download_rate_profile",
+      "label": "Download rate profile",
+      "type": "text",
+      "help": "constant_jitter, random_walk or bursty. Only for modes that download. Default: random_walk."
+    },
+    {
+      "key": "download_min_kbps",
+      "label": "Download min (KB/s)",
+      "type": "number",
+      "help": "Default: 20."
+    },
+    {
+      "key": "download_max_kbps",
+      "label": "Download max (KB/s)",
+      "type": "number",
+      "help": "Default: 500."
+    },
+    {
+      "key": "persist_counters",
+      "label": "Keep counters across restarts",
+      "type": "bool",
+      "help": "On by default. Switch it off to start from zero every time (logged)."
+    },
+    {
+      "key": "send_started_event",
+      "label": "Send the started event",
+      "type": "bool",
+      "help": "On by default."
+    },
+    {
+      "key": "scrape_enabled",
+      "label": "Scrape the tracker",
+      "type": "bool",
+      "help": "Also ask for the torrent's scrape now and then."
+    },
+    {
+      "key": "scrape_interval_ms",
+      "label": "Scrape interval (ms)",
+      "type": "number",
+      "help": "Default: 120000."
+    },
+    {
+      "key": "info_hash_encoding",
+      "label": "Info hash encoding",
+      "type": "text",
+      "help": "raw (the standard) or hex, for a tracker that expects the hash as text. Default: raw."
+    },
+    {
+      "key": "api_key_param",
+      "label": "API key parameter",
+      "type": "text",
+      "help": "Query parameter that carries the tracker API key below. Default: apikey."
+    },
+    {
+      "key": "tracker_api_key",
+      "label": "Tracker API key",
+      "type": "secret"
+    },
+    {
+      "key": "extra_query",
+      "label": "Extra query parameters",
+      "type": "text",
+      "help": "Added to every tracker request, for example passkey=abc123."
+    },
+    {
+      "key": "proxy_mode",
+      "label": "Proxy mode",
+      "type": "text",
+      "help": "none, shared (every peer uses the first proxy below) or per_peer (peer N uses proxy N; a peer without a proxy does not run, so it never announces from your real address). A peer keeps the proxy it was given. Default: none."
+    },
+    {
+      "key": "proxies",
+      "label": "Proxies",
+      "type": "list",
+      "help": "Tracker requests of a peer go through its proxy. Addresses start with socks5h:// (recommended), socks5://, http:// or https://.",
+      "item": [
+        {
+          "key": "url",
+          "label": "Address",
+          "type": "text",
+          "help": "For example socks5h://127.0.0.1:1080"
+        },
+        {
+          "key": "username",
+          "label": "User name",
+          "type": "text"
+        },
+        {
+          "key": "password",
+          "label": "Password",
+          "type": "secret"
+        }
+      ]
+    },
+    {
+      "key": "outbound_address",
+      "label": "Outbound address",
+      "type": "text",
+      "help": "A local IP address of this computer to send from when no proxy is used (picks the network card)."
+    },
+    {
+      "key": "data_dir",
+      "label": "Data folder",
+      "type": "text",
+      "help": "Where state.json is kept. Default: the data folder inside the plugin's folder."
+    },
+    {
+      "key": "log_level",
+      "label": "Log level",
+      "type": "text",
+      "help": "error, warn, info or debug. Default: info."
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["crates/tracker-sim"]
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true
