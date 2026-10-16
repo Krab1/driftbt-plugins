@@ -1,7 +1,7 @@
 {
   "id": "tracker-sim",
   "name": "Tracker Simulator",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "api": 1,
   "kinds": [
     "simulator"

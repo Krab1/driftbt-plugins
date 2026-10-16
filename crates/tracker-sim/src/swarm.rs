@@ -15,7 +15,7 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, Notify};
+use tokio::sync::{broadcast, mpsc, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 
@@ -33,6 +33,8 @@ const SLOTS: usize = 4;
 const OPTIMISTIC_SECS: u64 = 30;
 /// Requests being served at once per connection; more are ignored (the peer asks again).
 const MAX_SERVING: usize = 64;
+/// Pieces queued for one socket at once (32 x 16 KiB).
+const MAX_QUEUED: usize = 32;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -148,7 +150,10 @@ pub struct Snapshot {
 /// A connection as the choker sees it.
 struct Handle {
     id: u64,
-    tx: mpsc::UnboundedSender<Msg>,
+    /// Messages to write; a piece carries a permit that is released once it is written to the socket.
+    tx: mpsc::UnboundedSender<(Msg, Option<OwnedSemaphorePermit>)>,
+    /// Pieces queued for the socket at once: a slow reader at the other end holds the sender back.
+    slots: Arc<Semaphore>,
     peer_interested: AtomicBool,
     am_choking: AtomicBool,
     from: AtomicU64,
@@ -238,7 +243,7 @@ impl Node {
             let want_unchoked = open.contains(&h.id);
             if want_unchoked == h.am_choking.load(Relaxed) {
                 h.am_choking.store(!want_unchoked, Relaxed);
-                let _ = h.tx.send(if want_unchoked { Msg::Unchoke } else { Msg::Choke });
+                let _ = h.tx.send((if want_unchoked { Msg::Unchoke } else { Msg::Choke }, None));
             }
         }
     }
@@ -294,7 +299,7 @@ struct Session {
 
 impl Session {
     fn send(&self, m: Msg) {
-        let _ = self.h.tx.send(m);
+        let _ = self.h.tx.send((m, None));
     }
 
     fn release(&self, piece: u32) {
@@ -407,6 +412,7 @@ impl Session {
                 if !self.h.am_choking.load(Relaxed) && self.serving.len() < MAX_SERVING && lock(&self.node.have).get(piece as usize) {
                     let (node, h) = (self.node.clone(), self.h.clone());
                     self.serving.spawn(async move {
+                        let Ok(permit) = h.slots.clone().acquire_owned().await else { return };
                         node.up.take(len).await;
                         if lock(&h.cancelled).remove(&(piece, begin)) || h.am_choking.load(Relaxed) {
                             return;
@@ -416,9 +422,7 @@ impl Session {
                         if node.corrupt_serving.load(Relaxed) {
                             data[0] ^= 0xff;
                         }
-                        node.uploaded.fetch_add(u64::from(len), Relaxed);
-                        h.to.fetch_add(u64::from(len), Relaxed);
-                        let _ = h.tx.send(Msg::Piece { piece, begin, data });
+                        let _ = h.tx.send((Msg::Piece { piece, begin, data }, Some(permit)));
                     });
                 }
             }
@@ -502,19 +506,7 @@ async fn run_session(node: Arc<Node>, stream: TcpStream) -> Result<(), String> {
     if ih != node.info_hash || pid == node.peer_id {
         return Err("wrong torrent or connected to itself".into());
     }
-    let (tx, mut out) = mpsc::unbounded_channel::<Msg>();
-    let writer = tokio::spawn(async move {
-        let mut keepalive = tokio::time::interval_at(Instant::now() + Duration::from_secs(120), Duration::from_secs(120));
-        loop {
-            let bytes = tokio::select! {
-                m = out.recv() => match m { Some(m) => m.encode(), None => break },
-                _ = keepalive.tick() => Msg::KeepAlive.encode(),
-            };
-            if wr.write_all(&bytes).await.is_err() {
-                break;
-            }
-        }
-    });
+    let (tx, mut out) = mpsc::unbounded_channel::<(Msg, Option<OwnedSemaphorePermit>)>();
     let (frame_tx, mut frames) = mpsc::unbounded_channel();
     let reader = tokio::spawn(async move {
         loop {
@@ -525,10 +517,32 @@ async fn run_session(node: Arc<Node>, stream: TcpStream) -> Result<(), String> {
             }
         }
     });
-    let _tasks = AbortOnDrop(vec![writer, reader]);
 
     let n = node.content.pieces();
-    let h = Arc::new(Handle { id: node.next_session.fetch_add(1, Relaxed), tx, peer_interested: AtomicBool::new(false), am_choking: AtomicBool::new(true), from: AtomicU64::new(0), to: AtomicU64::new(0), cancelled: Mutex::new(HashSet::new()) });
+    let h = Arc::new(Handle { id: node.next_session.fetch_add(1, Relaxed), tx, slots: Arc::new(Semaphore::new(MAX_QUEUED)), peer_interested: AtomicBool::new(false), am_choking: AtomicBool::new(true), from: AtomicU64::new(0), to: AtomicU64::new(0), cancelled: Mutex::new(HashSet::new()) });
+    // Uploaded bytes are counted when they are written to the socket (not when queued), so a peer that reads slowly
+    // cannot leave the sender's counter far ahead of what the receiver has.
+    let writer = {
+        let (node, h) = (node.clone(), h.clone());
+        tokio::spawn(async move {
+            let mut keepalive = tokio::time::interval_at(Instant::now() + Duration::from_secs(120), Duration::from_secs(120));
+            loop {
+                let (bytes, payload, _permit) = tokio::select! {
+                    m = out.recv() => match m {
+                        Some((m, permit)) => (m.encode(), if let Msg::Piece { data, .. } = &m { data.len() as u64 } else { 0 }, permit),
+                        None => break,
+                    },
+                    _ = keepalive.tick() => (Msg::KeepAlive.encode(), 0, None),
+                };
+                if wr.write_all(&bytes).await.is_err() {
+                    break;
+                }
+                node.uploaded.fetch_add(payload, Relaxed);
+                h.to.fetch_add(payload, Relaxed);
+            }
+        })
+    };
+    let _tasks = AbortOnDrop(vec![writer, reader]);
     let mut events = node.have_tx.subscribe();
     lock(&node.sessions).push(h.clone());
     let mut s = Session { node: node.clone(), h, remote: Bits::new(n), peer_choking: true, am_interested: false, pending: HashMap::new(), partial: HashMap::new(), current: None, serving: JoinSet::new(), seen_message: false };
