@@ -1,7 +1,7 @@
 {
   "id": "tracker-sim",
   "name": "Tracker Simulator",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "api": 1,
   "kinds": [
     "simulator"
@@ -22,12 +22,6 @@
       "label": "Stealth level",
       "type": "text",
       "help": "basic, medium, high or maximum. More irregularity in announce timing and between peers. Default: high."
-    },
-    {
-      "key": "client_profile",
-      "label": "Client profile",
-      "type": "text",
-      "help": "auto, qbittorrent, transmission, deluge, custom or debug_obvious (an obvious -DRSIM0- peer id, for finding the bots in tracker logs). Default: auto. A peer keeps the profile it was created with."
     },
     {
       "key": "custom_peer_id_prefix",
@@ -133,6 +127,20 @@
   ],
   "torrent_status": true,
   "torrent_settings": [
+    {
+      "key": "client_profile",
+      "label": "Client",
+      "type": "text",
+      "options": [
+        "auto",
+        "qbittorrent",
+        "transmission",
+        "deluge",
+        "custom",
+        "debug_obvious"
+      ],
+      "help": "Which client the peers pretend to be. auto: a mix. custom uses the custom peer id and user agent from the plugin settings. debug_obvious: an obvious -DRSIM0- peer id, for finding the bots in tracker logs. Each client has its own peers, so a peer keeps its id when you switch back."
+    },
     {
       "key": "mode",
       "label": "Mode",

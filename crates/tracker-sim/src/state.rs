@@ -119,18 +119,33 @@ impl Store {
 
     /// The identity at `index`, created (and saved) on first use. Identities are numbered in order, so peer
     /// number 2 of any torrent is always bot-002.
+    ///
+    /// A torrent that names a client gets that client's own identities: its peer number 2 is the second identity
+    /// with that profile, created when it is first needed. `auto` takes the numbered ones whatever their profile.
     pub fn identity(&mut self, index: usize, requested: &str, custom_prefix: &str) -> Identity {
-        while self.state.identities.len() <= index {
-            let mut id = identity::generate(self.state.identities.len(), rng::entropy(), requested, custom_prefix);
-            // A tracker keys peers by address and port, so two identities sharing a port would be one peer to it.
-            while self.state.identities.iter().any(|o| o.port == id.port) {
-                id.port = if id.port == u16::MAX { 10_000 } else { id.port + 1 };
+        let want = crate::profiles::canonical(requested);
+        if !matches!(want, "" | "auto") {
+            let of_kind = |s: &Self| s.state.identities.iter().enumerate().filter(|(_, i)| i.client_profile == want).map(|(n, _)| n).collect::<Vec<_>>();
+            while of_kind(self).len() <= index {
+                self.add_identity(want, custom_prefix);
             }
-            info!("new identity {} peer_id={} port={} profile={}", id.identity_id, id.peer_id, id.port, id.client_profile);
-            self.state.identities.push(id);
-            self.save();
+            return self.state.identities[of_kind(self)[index]].clone();
+        }
+        while self.state.identities.len() <= index {
+            self.add_identity(requested, custom_prefix);
         }
         self.state.identities[index].clone()
+    }
+
+    fn add_identity(&mut self, requested: &str, custom_prefix: &str) {
+        let mut id = identity::generate(self.state.identities.len(), rng::entropy(), requested, custom_prefix);
+        // A tracker keys peers by address and port, so two identities sharing a port would be one peer to it.
+        while self.state.identities.iter().any(|o| o.port == id.port) {
+            id.port = if id.port == u16::MAX { 10_000 } else { id.port + 1 };
+        }
+        info!("new identity {} peer_id={} port={} profile={}", id.identity_id, id.peer_id, id.port, id.client_profile);
+        self.state.identities.push(id);
+        self.save();
     }
 }
 
@@ -178,5 +193,24 @@ mod tests {
     fn disabled_entry_serialises_as_just_enabled() {
         let v = serde_json::to_value(TorrentSel::default()).unwrap();
         assert_eq!(v, serde_json::json!({"enabled": false}));
+    }
+}
+
+#[cfg(test)]
+mod client_tests {
+    use super::*;
+
+    #[test]
+    fn a_named_client_has_its_own_peers() {
+        let mut s = Store::load(std::env::temp_dir().join(format!("tracker-sim-cl-{}", rng::entropy())).join("state.json"));
+        let a = s.identity(0, "transmission", "");
+        let b = s.identity(1, "transmission", "");
+        let q = s.identity(0, "qbittorrent", "");
+        assert!(a.peer_id.starts_with("-TR4040-") && b.peer_id.starts_with("-TR4040-") && q.peer_id.starts_with("-qB4650-"));
+        assert_ne!(a.identity_id, b.identity_id);
+        assert_eq!(s.identity(1, "transmission", ""), b, "the same peer number is the same peer next time");
+        assert_eq!(s.identity(0, "transmission", ""), a);
+        let ports: std::collections::BTreeSet<u16> = [&a, &b, &q].iter().map(|i| i.port).collect();
+        assert_eq!(ports.len(), 3, "no two share a port");
     }
 }

@@ -192,11 +192,11 @@ pub struct Settings {
 }
 
 /// What a torrent can set for itself: the fields of `torrent_settings` in plugin.json.
-const TORRENT_KEYS: [&str; 12] = ["mode", "peers", "upload_rate_profile", "upload_min_kbps", "upload_max_kbps", "download_rate_profile", "download_min_kbps", "download_max_kbps", "partial_availability_percent", "piece_strategy", "follow_tracker", "activity_pattern"];
+const TORRENT_KEYS: [&str; 13] = ["client_profile", "mode", "peers", "upload_rate_profile", "upload_min_kbps", "upload_max_kbps", "download_rate_profile", "download_min_kbps", "download_max_kbps", "partial_availability_percent", "piece_strategy", "follow_tracker", "activity_pattern"];
 
 /// Settings that used to be in the global form. They are chosen per torrent now (or are fixed), so values an older
 /// version saved are ignored: a forgotten "off" must not outlive the form that set it.
-const RETIRED: [&str; 17] = ["default_mode", "default_peer_count", "peer_count_max", "partial_availability_percent", "piece_strategy", "follow_tracker", "activity_pattern", "upload_rate_profile", "upload_min_kbps", "upload_max_kbps", "download_rate_profile", "download_min_kbps", "download_max_kbps", "persist_counters", "send_started_event", "scrape_enabled", "scrape_interval_ms"];
+const RETIRED: [&str; 18] = ["client_profile", "default_mode", "default_peer_count", "peer_count_max", "partial_availability_percent", "piece_strategy", "follow_tracker", "activity_pattern", "upload_rate_profile", "upload_min_kbps", "upload_max_kbps", "download_rate_profile", "download_min_kbps", "download_max_kbps", "persist_counters", "send_started_event", "scrape_enabled", "scrape_interval_ms"];
 
 fn text<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
     v.get(k)?.as_str().map(str::trim).filter(|s| !s.is_empty())
@@ -282,6 +282,7 @@ impl Settings {
     pub fn effective_options(&self) -> serde_json::Map<String, Value> {
         let kbps = |bps: f64| Value::from((bps / 1024.0).round() as u64);
         let mut m = serde_json::Map::new();
+        m.insert("client_profile".into(), crate::profiles::canonical(&self.client_profile).into());
         m.insert("mode".into(), self.default_mode.name().into());
         m.insert("peers".into(), self.default_peer_count.into());
         m.insert("upload_rate_profile".into(), self.upload.profile.name().into());
@@ -405,6 +406,15 @@ mod tests {
         assert!(s.follow_tracker && s.send_started && s.persist_counters && s.default_peer_count == 1);
         assert_eq!(s.upload.max_bps, 800.0 * 1024.0);
         assert_eq!(s.stealth, Stealth::Basic, "what is still asked for is kept");
+    }
+
+    #[test]
+    fn a_torrent_can_choose_its_client() {
+        let g = Settings::from_host(&json!({"client_profile": "deluge"}));
+        assert_eq!(g.client_profile, "auto", "the old global choice is retired");
+        let t = g.for_torrent(json!({"client_profile": "transmission"}).as_object().unwrap());
+        assert_eq!(t.client_profile, "transmission");
+        assert_eq!(g.effective_options()["client_profile"], "auto");
     }
 
     #[test]
