@@ -33,8 +33,8 @@ const ALNUM: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTU
 /// `requested` is the client_profile setting; `auto` picks one of the three real-client looks from the seed.
 pub fn generate(index: usize, seed: u64, requested: &str, custom_prefix: &str) -> Identity {
     let mut rng = Rng::new(seed);
-    let name = match requested {
-        "qbittorrent_like" | "transmission_like" | "deluge_like" | "custom" | "debug_obvious" => requested.to_string(),
+    let name = match profiles::canonical(requested) {
+        n @ ("qbittorrent" | "transmission" | "deluge" | "custom" | "debug_obvious") => n.to_string(),
         _ => profiles::CONCRETE[match rng.below(10) {
             0..=4 => 0,
             5..=7 => 1,
@@ -99,7 +99,9 @@ mod tests {
 
     #[test]
     fn personality_is_stable_and_ids_are_numbered() {
-        let id = generate(2, 7, "qbittorrent_like", "");
+        let id = generate(2, 7, "qbittorrent", "");
+        assert_eq!(id.client_profile, "qbittorrent");
+        assert_eq!(generate(2, 7, "qbittorrent_like", "").client_profile, "qbittorrent", "the old name still works");
         assert_eq!(id.identity_id, "bot-003");
         assert_eq!(id.personality(1.0).rate_scale, id.personality(1.0).rate_scale);
     }

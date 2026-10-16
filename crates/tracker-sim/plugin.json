@@ -1,7 +1,7 @@
 {
   "id": "tracker-sim",
   "name": "Tracker Simulator",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "api": 1,
   "kinds": [
     "simulator"
@@ -27,7 +27,7 @@
       "key": "client_profile",
       "label": "Client profile",
       "type": "text",
-      "help": "auto, qbittorrent_like, transmission_like, deluge_like, custom or debug_obvious (an obvious -DRSIM0- peer id, for finding the bots in tracker logs). Default: auto. A peer keeps the profile it was created with."
+      "help": "auto, qbittorrent, transmission, deluge, custom or debug_obvious (an obvious -DRSIM0- peer id, for finding the bots in tracker logs). Default: auto. A peer keeps the profile it was created with."
     },
     {
       "key": "custom_peer_id_prefix",
@@ -49,9 +49,15 @@
     },
     {
       "key": "default_peer_count",
-      "label": "Default peer count",
+      "label": "Peers per torrent",
       "type": "number",
-      "help": "Simulated peers per torrent, 1 to 20. Default: 1."
+      "help": "Simulated peers per torrent, 1 to 20 (each is a separate client with its own peer ID, port and timing). Default: 1."
+    },
+    {
+      "key": "peer_count_max",
+      "label": "Peers per torrent (random up to)",
+      "type": "number",
+      "help": "If this is higher than Peers per torrent, each time a torrent is switched on a random number of peers between the two is used. Leave empty or 0 for a fixed number."
     },
     {
       "key": "partial_availability_percent",

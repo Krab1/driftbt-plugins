@@ -180,7 +180,7 @@ impl Sim {
             let sel = store.state.torrents.entry(hash.clone()).or_default();
             if enabled {
                 if !sel.enabled || sel.mode.is_none() {
-                    *sel = TorrentSel { enabled: true, mode: Some(s.default_mode), peer_count: Some(if s.default_mode == Mode::LoopbackPair { s.default_peer_count.max(2) } else { s.default_peer_count }), started_at: Some(now_iso()) };
+                    *sel = TorrentSel { enabled: true, mode: Some(s.default_mode), peer_count: Some(s.pick_peer_count(crate::rng::entropy()).max(if s.default_mode == Mode::LoopbackPair { 2 } else { 1 })), started_at: Some(now_iso()) };
                 }
             } else {
                 *sel = TorrentSel::default();
@@ -575,6 +575,17 @@ mod tests {
         assert!(sim.jobs.is_empty(), "a torrent Drift dropped stops, its switch is kept");
         assert_eq!(is_on(&sim, &b), Some(true));
         sim.shutdown();
+    }
+
+    #[test]
+    fn peer_count_is_fixed_or_random_within_the_range() {
+        let fixed = Settings::from_json(&json!({"default_peer_count": 3}));
+        assert!((0..50).all(|r| fixed.pick_peer_count(r) == 3));
+        let ranged = Settings::from_json(&json!({"default_peer_count": 2, "peer_count_max": 5}));
+        let seen: std::collections::BTreeSet<usize> = (0..50).map(|r| ranged.pick_peer_count(r)).collect();
+        assert_eq!(seen, [2, 3, 4, 5].into());
+        let inverted = Settings::from_json(&json!({"default_peer_count": 4, "peer_count_max": 2}));
+        assert!((0..50).all(|r| inverted.pick_peer_count(r) == 4), "a max below the minimum is ignored");
     }
 
     #[test]

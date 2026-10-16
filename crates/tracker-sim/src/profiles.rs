@@ -16,13 +16,24 @@ pub struct Profile {
     pub transmission_query: bool,
 }
 
-pub const CONCRETE: [&str; 3] = ["qbittorrent_like", "transmission_like", "deluge_like"];
+pub const CONCRETE: [&str; 3] = ["qbittorrent", "transmission", "deluge"];
+
+/// The profile's current name. Older versions called the three clients `qbittorrent_like` and so on; identities saved
+/// by them keep working.
+pub fn canonical(name: &str) -> &str {
+    match name {
+        "qbittorrent_like" => "qbittorrent",
+        "transmission_like" => "transmission",
+        "deluge_like" => "deluge",
+        other => other,
+    }
+}
 
 pub fn resolve(name: &str, custom_prefix: &str, custom_ua: &str) -> Profile {
     let p = |prefix: &str, ua: &str, num_want, port_lo, port_hi, lower_body, unchoke_secs| Profile { prefix: prefix.into(), user_agent: ua.into(), num_want, port_lo, port_hi, lower_body, unchoke_secs, transmission_query: false };
-    match name {
-        "transmission_like" => Profile { transmission_query: true, ..p("-TR4040-", "Transmission/4.0.4", 80, 51413, 51413, true, 10) },
-        "deluge_like" => p("-DE211s-", "Deluge/2.1.1 libtorrent/2.0.9.0", 200, 6881, 6891, false, 15),
+    match canonical(name) {
+        "transmission" => Profile { transmission_query: true, ..p("-TR4040-", "Transmission/4.0.4", 80, 51413, 51413, true, 10) },
+        "deluge" => p("-DE211s-", "Deluge/2.1.1 libtorrent/2.0.9.0", 200, 6881, 6891, false, 15),
         "debug_obvious" => p("-DRSIM0-", "tracker-sim-debug", 50, 6881, 6881, false, 5),
         "custom" => {
             let prefix: String = custom_prefix.chars().filter(char::is_ascii_graphic).take(8).collect();

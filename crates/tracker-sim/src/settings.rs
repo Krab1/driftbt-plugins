@@ -153,6 +153,8 @@ pub struct Settings {
     pub client_profile: String,
     pub default_mode: Mode,
     pub default_peer_count: usize,
+    /// If above `default_peer_count`, each switch-on picks a random count in between.
+    pub peer_count_max: usize,
     pub announce_base_ms: f64,
     pub jitter: f64,
     pub start_delay_max_ms: u64,
@@ -232,12 +234,19 @@ fn proxies(v: &Value) -> Vec<ProxyDef> {
 }
 
 impl Settings {
+    /// The number of peers for a torrent being switched on: fixed, or random within the configured range.
+    pub fn pick_peer_count(&self, random: u64) -> usize {
+        let (lo, hi) = (self.default_peer_count, self.peer_count_max.max(self.default_peer_count));
+        lo + (random % (hi - lo + 1) as u64) as usize
+    }
+
     pub fn from_json(v: &Value) -> Self {
         Self {
             stealth: choice(v, "stealth_level", Stealth::parse, Stealth::High),
             client_profile: text(v, "client_profile").unwrap_or("auto").to_string(),
             default_mode: choice(v, "default_mode", Mode::parse, Mode::SeedOnly),
             default_peer_count: num(v, "default_peer_count").unwrap_or(1.0).clamp(1.0, 20.0) as usize,
+            peer_count_max: num(v, "peer_count_max").unwrap_or(0.0).clamp(0.0, 20.0) as usize,
             announce_base_ms: num(v, "announce_interval_base_ms").unwrap_or(30_000.0).clamp(1000.0, 3_600_000.0),
             jitter: num(v, "announce_jitter_percent").unwrap_or(25.0).clamp(0.0, 90.0) / 100.0,
             start_delay_max_ms: num(v, "start_delay_max_ms").unwrap_or(15_000.0).clamp(0.0, 300_000.0) as u64,
