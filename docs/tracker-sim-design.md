@@ -73,7 +73,7 @@ Tick 200 ms. Profiles: `constant_jitter` (target near the middle, ±15 %, smooth
 
 ### State (`state.rs`)
 
-`<data_dir or ../.tracker-sim>/state.json` (the plugin folder is the working directory, so by default the file sits beside the plugin folders in `<data>/plugins/.tracker-sim/`, where replacing or updating the plugin folder doesn't touch it; Drift ignores a folder without a `plugin.json`): `{version, identities[], torrents{hash:{enabled,mode,peer_count,started_at}}, counters{"bot-001:<hash>":{uploaded_bytes,downloaded_bytes,have_bytes?,last_announce_time}}}`. Written to `state.json.tmp` then renamed. A corrupt file is renamed `state.json.corrupt` and the plugin starts empty. Counters are saved after every successful announce and on stop. `persist_counters=false` starts from zero each run (the peer still has the same identity).
+`<data_dir or ../.tracker-sim>/state.json` (the plugin folder is the working directory, so by default the file sits beside the plugin folders in `<data>/plugins/.tracker-sim/`, where replacing or updating the plugin folder doesn't touch it; Drift ignores a folder without a `plugin.json`): `{version, identities[], torrents{hash:{enabled,mode,peer_count,started_at}}, counters{"bot-001:<hash>":{uploaded_bytes,downloaded_bytes,have_bytes?,last_announce_time}}}`. Written to `state.json.tmp` then renamed. A corrupt file is renamed `state.json.corrupt` and the plugin starts empty. Counters are saved after every successful announce and on stop. Counters always carry over between runs.
 
 ### Tracker client (`tracker.rs`)
 

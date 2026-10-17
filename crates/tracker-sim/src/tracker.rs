@@ -252,7 +252,16 @@ pub async fn get(client: &reqwest::Client, url: &str, user_agent: &str) -> Resul
     if !r.status().is_success() {
         return Err(format!("status {}", r.status().as_u16()));
     }
-    r.bytes().await.map(|b| b.to_vec()).map_err(|e| e.without_url().to_string())
+    const MAX_BODY: usize = 1 << 20;
+    let mut r = r;
+    let mut body = Vec::new();
+    while let Some(chunk) = r.chunk().await.map_err(|e| e.without_url().to_string())? {
+        if body.len() + chunk.len() > MAX_BODY {
+            return Err("answer too large".into());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 #[cfg(test)]

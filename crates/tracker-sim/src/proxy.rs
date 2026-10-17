@@ -26,7 +26,8 @@ pub fn assign(defs: &[ProxyDef], mode: ProxyMode, current: Option<&str>, taken: 
 
 /// An HTTP client for one peer: through its proxy, or from a chosen local address, or plain.
 pub fn client(proxy: Option<&ProxyDef>, local_address: Option<IpAddr>) -> Result<reqwest::Client, String> {
-    let mut b = reqwest::Client::builder().timeout(Duration::from_secs(15));
+    // No Referer: a redirect would otherwise send the announce URL, with its passkey, to another host.
+    let mut b = reqwest::Client::builder().timeout(Duration::from_secs(15)).referer(false);
     if let Some(p) = proxy {
         let mut px = reqwest::Proxy::all(&p.url).map_err(|e| format!("proxy {}: {}", p.id, e.without_url()))?;
         if !p.username.is_empty() {

@@ -195,7 +195,7 @@ impl Sim {
                     o.retain(|k, v| defaults.get(k) != Some(v));
                     o
                 });
-                if !was_on || (options.is_some() && sel.options != options) {
+                if !was_on || options.as_ref().is_some_and(|o| *o != sel.options.clone().unwrap_or_default()) {
                     let opts = options.or_else(|| sel.options.clone().filter(|_| was_on));
                     let eff = self.shared.settings.for_torrent(opts.as_ref().unwrap_or(&serde_json::Map::new()));
                     let min_peers = if eff.default_mode == Mode::LoopbackPair { 2 } else { 1 };
@@ -349,7 +349,7 @@ impl Sim {
                     continue;
                 }
             };
-            lock(&self.shared.store).set_proxy(i, def.filter(|_| s.proxy_mode == ProxyMode::PerPeer).map(|d| d.id.clone()));
+            lock(&self.shared.store).set_proxy(&id.identity_id, def.filter(|_| s.proxy_mode == ProxyMode::PerPeer).map(|d| d.id.clone()));
             info!("{} uses {}", id.identity_id, def.map_or("a direct connection", |d| d.id.as_str()));
             handles.push(self.rt.spawn(run_peer(self.shared.clone(), client, hash.to_string(), id, mode, lo.clone().map(|c| (c, i)), gate.clone(), own.clone(), cfg.clone(), rx.clone())));
         }
@@ -596,7 +596,14 @@ async fn run_peer(sh: Arc<Shared>, client: reqwest::Client, hash: String, id: Id
                 None
             };
             let round = announce_round(&sh, &client, &hash, &ih, &peer, &profile, event, ANNOUNCE_TIMEOUT);
-            let outcome = tokio::select! { o = round => o, () = until_stop(&mut stop) => break };
+            let outcome = tokio::select! {
+                o = round => o,
+                () = until_stop(&mut stop) => {
+                    // The tracker may already have registered the first request, so the goodbye is still due.
+                    started |= event == Some("started");
+                    break;
+                }
+            };
             match outcome {
                 Outcome::Done(a) => {
                     started = true;

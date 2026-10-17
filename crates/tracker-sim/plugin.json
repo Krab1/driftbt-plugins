@@ -1,7 +1,7 @@
 {
   "id": "tracker-sim",
   "name": "Tracker Simulator",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "api": 1,
   "kinds": [
     "simulator"
@@ -116,7 +116,7 @@
       "key": "data_dir",
       "label": "Data folder",
       "type": "text",
-      "help": "Where state.json is kept. Default: the data folder inside the plugin's folder."
+      "help": "Where state.json is kept. Default: a .tracker-sim folder beside the plugin folders, so updating the plugin doesn't touch it."
     },
     {
       "key": "log_level",

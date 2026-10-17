@@ -110,8 +110,8 @@ impl Store {
         }
     }
 
-    pub fn set_proxy(&mut self, index: usize, proxy_id: Option<String>) {
-        if let Some(id) = self.state.identities.get_mut(index).filter(|i| i.proxy_id != proxy_id) {
+    pub fn set_proxy(&mut self, identity_id: &str, proxy_id: Option<String>) {
+        if let Some(id) = self.state.identities.iter_mut().find(|i| i.identity_id == identity_id).filter(|i| i.proxy_id != proxy_id) {
             id.proxy_id = proxy_id;
             self.save();
         }
@@ -123,9 +123,14 @@ impl Store {
     /// A torrent that names a client gets that client's own identities: its peer number 2 is the second identity
     /// with that profile, created when it is first needed. `auto` takes the numbered ones whatever their profile.
     pub fn identity(&mut self, index: usize, requested: &str, custom_prefix: &str) -> Identity {
-        let want = crate::profiles::canonical(requested);
-        if !matches!(want, "" | "auto") {
-            let of_kind = |s: &Self| s.state.identities.iter().enumerate().filter(|(_, i)| i.client_profile == want).map(|(n, _)| n).collect::<Vec<_>>();
+        let lower = requested.to_ascii_lowercase();
+        // Anything that isn't a known client is `auto`: a made-up name could never be matched and would add identities forever.
+        let want = match crate::profiles::canonical(lower.trim()) {
+            n @ ("qbittorrent" | "transmission" | "deluge" | "custom" | "debug_obvious") => n,
+            _ => "auto",
+        };
+        if want != "auto" {
+            let of_kind = |s: &Self| s.state.identities.iter().enumerate().filter(|(_, i)| crate::profiles::canonical(&i.client_profile) == want).map(|(n, _)| n).collect::<Vec<_>>();
             while of_kind(self).len() <= index {
                 self.add_identity(want, custom_prefix);
             }
@@ -199,6 +204,25 @@ mod tests {
 #[cfg(test)]
 mod client_tests {
     use super::*;
+
+    #[test]
+    fn an_unknown_client_name_means_auto_instead_of_looping() {
+        let mut s = Store::load(std::env::temp_dir().join(format!("tracker-sim-cl-{}", rng::entropy())).join("state.json"));
+        let a = s.identity(1, "Utorrent", "");
+        assert_eq!(s.state.identities.len(), 2, "no runaway identities");
+        assert_eq!(s.identity(1, "  ", ""), a);
+        let t = s.identity(0, "Transmission", "");
+        assert_eq!(t.client_profile, "transmission", "names are not case sensitive");
+    }
+
+    #[test]
+    fn a_proxy_is_saved_on_the_identity_it_was_given_to() {
+        let mut s = Store::load(std::env::temp_dir().join(format!("tracker-sim-cl-{}", rng::entropy())).join("state.json"));
+        let _auto = s.identity(2, "auto", "");
+        let tr = s.identity(0, "transmission", "");
+        s.set_proxy(&tr.identity_id, Some("p1".into()));
+        assert_eq!(s.state.identities.iter().filter(|i| i.proxy_id.is_some()).map(|i| i.identity_id.clone()).collect::<Vec<_>>(), vec![tr.identity_id]);
+    }
 
     #[test]
     fn a_named_client_has_its_own_peers() {
