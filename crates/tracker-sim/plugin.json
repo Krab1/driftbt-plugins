@@ -1,7 +1,7 @@
 {
   "id": "tracker-sim",
   "name": "Tracker Simulator",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "api": 1,
   "kinds": [
     "simulator"
@@ -136,15 +136,17 @@
         "qbittorrent",
         "transmission",
         "deluge",
+        "utorrent",
         "custom",
         "debug_obvious"
       ],
-      "help": "Which client the peers pretend to be. auto: a mix. custom uses the custom peer id and user agent from the plugin settings. debug_obvious: an obvious -DRSIM0- peer id, for finding the bots in tracker logs. Each client has its own peers, so a peer keeps its id when you switch back.",
+      "help": "Which client the peers pretend to be. auto: a mix of qbittorrent, transmission and deluge (not utorrent: pick it yourself). custom uses the custom peer id and user agent from the plugin settings. debug_obvious: an obvious -DRSIM0- peer id, for finding the bots in tracker logs. Each client has its own peers, so a peer keeps its id when you switch back.",
       "option_help": {
         "auto": "A mix of clients: each simulated peer gets one of qBittorrent, Transmission or Deluge and keeps it.",
         "qbittorrent": "Every peer announces like qBittorrent: its peer id, User-Agent and query layout.",
         "transmission": "Every peer announces like Transmission: its peer id, User-Agent and query layout.",
         "deluge": "Every peer announces like Deluge (libtorrent): its peer id, User-Agent and query layout.",
+        "utorrent": "Every peer announces like uTorrent 3.6.0, copied from a real announce: peer id -UT360S- plus random bytes, its User-Agent and its query layout.",
         "custom": "Uses the custom peer id prefix and User-Agent from the plugin settings.",
         "debug_obvious": "Peers announce an obvious -DRSIM0- id, so you can find the simulated peers in your tracker logs."
       }

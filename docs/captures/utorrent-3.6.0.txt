@@ -1,0 +1,16 @@
+A real uTorrent 3.6.0 announce, recorded on 2026-10-25 by a tracker test dashboard on this computer (127.0.0.1).
+The tracker test used here is the author's own. Only one announce (event=started) was captured; later announces are
+assumed to be the same without `event`, and `stopped` / `completed` to carry that event after `key`.
+
+Request line:
+GET /announce?info_hash=B%e7%8a0%13m%84%2c%d4%2a%04%0e%df%92u%09%ee%e6%af%ff&peer_id=-UT360S-%1e%b9_%e7%92Kc%e5%eak%06%de&port=38934&uploaded=0&downloaded=0&left=11534966&corrupt=0&key=092B59D3&event=started&numwant=200&compact=1&no_peer_id=1 HTTP/1.1
+
+Headers, in the order received:
+Host: 127.0.0.1:8000
+User-Agent: uTorrent/360(113359134)(47390)
+Accept-Encoding: gzip
+Connection: Close
+
+Notes: percent codes are lower case; peer_id = "-UT360S-" + 12 random bytes (not letters and digits); key = 8 upper-case hex
+digits; the port is random (here 38934); there is no supportcrypto. The tracker's answer used interval 60.
+Not copied: the Accept-Encoding header, and the exact spelling of Connection (the HTTP library sends Accept: */* too).

@@ -34,7 +34,7 @@ const ALNUM: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTU
 pub fn generate(index: usize, seed: u64, requested: &str, custom_prefix: &str) -> Identity {
     let mut rng = Rng::new(seed);
     let name = match profiles::canonical(requested) {
-        n @ ("qbittorrent" | "transmission" | "deluge" | "custom" | "debug_obvious") => n.to_string(),
+        n @ ("qbittorrent" | "transmission" | "deluge" | "utorrent" | "custom" | "debug_obvious") => n.to_string(),
         _ => profiles::CONCRETE[match rng.below(10) {
             0..=4 => 0,
             5..=7 => 1,
@@ -45,6 +45,12 @@ pub fn generate(index: usize, seed: u64, requested: &str, custom_prefix: &str) -
     let profile = profiles::resolve(&name, custom_prefix, "");
     let pool = if profile.lower_body { &ALNUM[..36] } else { ALNUM };
     let mut peer_id = profile.prefix.clone();
+    if name == "utorrent" {
+        // uTorrent's id ends in 12 random bytes, not letters and digits. Each byte is kept as the character with that code.
+        while peer_id.chars().count() < 20 {
+            peer_id.push(rng.below(256) as u8 as char);
+        }
+    }
     while peer_id.len() < 20 {
         peer_id.push(pool[rng.below(pool.len() as u64) as usize] as char);
     }
@@ -58,6 +64,11 @@ pub fn generate(index: usize, seed: u64, requested: &str, custom_prefix: &str) -
         personality_seed: format!("{:016x}", rng.next_u64()),
         proxy_id: None,
     }
+}
+
+/// The 20 bytes of a peer id: every character is one byte (see `generate`; ASCII ids are unchanged).
+pub fn peer_id_bytes(id: &str) -> Vec<u8> {
+    id.chars().map(|c| c as u32 as u8).collect()
 }
 
 impl Identity {
@@ -84,6 +95,17 @@ mod tests {
     fn same_seed_same_identity() {
         assert_eq!(generate(0, 42, "auto", ""), generate(0, 42, "auto", ""));
         assert_ne!(generate(0, 42, "auto", "").peer_id, generate(0, 43, "auto", "").peer_id);
+    }
+
+    #[test]
+    fn utorrent_peers_have_a_real_looking_id_and_it_survives_saving() {
+        let a = generate(0, 7, "utorrent", "");
+        let bytes = peer_id_bytes(&a.peer_id);
+        assert_eq!((bytes.len(), &bytes[..8]), (20, &b"-UT360S-"[..]));
+        assert!((0..40).any(|s| peer_id_bytes(&generate(0, s, "utorrent", "").peer_id)[8..].iter().any(|b| *b >= 0x80)), "random bytes, not only ASCII");
+        assert!(a.key.len() == 8 && a.port >= 10_000);
+        let back: Identity = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert_eq!(peer_id_bytes(&back.peer_id), bytes);
     }
 
     #[test]

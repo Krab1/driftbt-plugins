@@ -18,6 +18,8 @@ pub struct Params<'a> {
     pub tracker_id: Option<&'a str>,
     /// Parameter order and set of a Transmission client instead of a libtorrent one.
     pub transmission_style: bool,
+    /// uTorrent's parameter set and lower-case percent codes.
+    pub utorrent_style: bool,
 }
 
 pub fn hash_bytes(hex: &str) -> Option<[u8; 20]> {
@@ -43,8 +45,22 @@ pub fn pct(bytes: &[u8]) -> String {
     s
 }
 
-fn encode_hash(h: &[u8; 20], enc: HashEncoding) -> String {
+/// Like `pct`, with lower-case hex digits (uTorrent writes `%e7`, the others `%E7`).
+pub fn pct_lower(bytes: &[u8]) -> String {
+    pct(bytes)
+        .as_bytes()
+        .iter()
+        .scan(0u8, |left, &b| {
+            // the two characters after a % are the hex digits
+            let c = if *left > 0 { *left -= 1; (b as char).to_ascii_lowercase() } else { if b == b'%' { *left = 2; } b as char };
+            Some(c)
+        })
+        .collect()
+}
+
+fn encode_hash(h: &[u8; 20], enc: HashEncoding, lower: bool) -> String {
     match enc {
+        HashEncoding::Raw if lower => pct_lower(h),
         HashEncoding::Raw => pct(h),
         HashEncoding::Hex => h.iter().map(|b| format!("{b:02x}")).collect(),
     }
@@ -58,8 +74,8 @@ fn join(base: &str, query: &str) -> String {
 pub fn announce_url(base: &str, p: &Params, enc: HashEncoding, extra: &str) -> String {
     let head = format!(
         "info_hash={}&peer_id={}&port={}&uploaded={}&downloaded={}&left={}",
-        encode_hash(p.info_hash, enc),
-        pct(p.peer_id.as_bytes()),
+        encode_hash(p.info_hash, enc, p.utorrent_style),
+        if p.utorrent_style { pct_lower(&crate::identity::peer_id_bytes(p.peer_id)) } else { pct(&crate::identity::peer_id_bytes(p.peer_id)) },
         p.port,
         p.uploaded,
         p.downloaded,
@@ -69,7 +85,9 @@ pub fn announce_url(base: &str, p: &Params, enc: HashEncoding, extra: &str) -> S
     if let Some(t) = p.tracker_id {
         event.push_str(&format!("&trackerid={t}"));
     }
-    let mut q = if p.transmission_style {
+    let mut q = if p.utorrent_style {
+        format!("{head}&corrupt=0&key={}{event}&numwant={}&compact=1&no_peer_id=1", p.key, p.num_want)
+    } else if p.transmission_style {
         format!("{head}&numwant={}&key={}&compact=1&supportcrypto=1{event}", p.num_want, p.key)
     } else {
         format!("{head}&key={}{event}&numwant={}&compact=1&no_peer_id=1&supportcrypto=1", p.key, p.num_want)
@@ -87,7 +105,7 @@ pub fn scrape_url(base: &str, info_hash: &[u8; 20], enc: HashEncoding, extra: &s
     let slash = path.rfind('/')?;
     let tail = path[slash + 1..].strip_prefix("announce")?;
     let mut q = String::from(query);
-    for part in [format!("info_hash={}", encode_hash(info_hash, enc)), extra.to_string()] {
+    for part in [format!("info_hash={}", encode_hash(info_hash, enc, false)), extra.to_string()] {
         if !part.is_empty() {
             if !q.is_empty() {
                 q.push('&');
@@ -247,8 +265,12 @@ impl<'a> Bencode<'a> {
 }
 
 /// One GET. The error text never contains the URL (it may hold a passkey).
-pub async fn get(client: &reqwest::Client, url: &str, user_agent: &str) -> Result<Vec<u8>, String> {
-    let r = client.get(url).header("User-Agent", user_agent).send().await.map_err(|e| e.without_url().to_string())?;
+pub async fn get(client: &reqwest::Client, url: &str, user_agent: &str, close: bool) -> Result<Vec<u8>, String> {
+    let mut req = client.get(url).header("User-Agent", user_agent);
+    if close {
+        req = req.header("Connection", "close");
+    }
+    let r = req.send().await.map_err(|e| e.without_url().to_string())?;
     if !r.status().is_success() {
         return Err(format!("status {}", r.status().as_u16()));
     }
@@ -271,7 +293,7 @@ mod tests {
     #[test]
     fn announce_url_encodes_raw_bytes_once() {
         let h = hash_bytes(&format!("ab01{}", "ff".repeat(18))).unwrap();
-        let p = Params { info_hash: &h, peer_id: "-qB4650-abcdefghijkl", port: 51413, uploaded: 5, downloaded: 6, left: 7, num_want: 200, event: Some("started"), key: "AB12CD34", tracker_id: Some("t%201"), transmission_style: false };
+        let p = Params { info_hash: &h, peer_id: "-qB4650-abcdefghijkl", port: 51413, uploaded: 5, downloaded: 6, left: 7, num_want: 200, event: Some("started"), key: "AB12CD34", tracker_id: Some("t%201"), transmission_style: false, utorrent_style: false };
         let u = announce_url("http://t.example/announce?passkey=k", &p, HashEncoding::Raw, "apikey=z");
         assert!(u.starts_with("http://t.example/announce?passkey=k&info_hash=%AB%01%FF"), "{u}");
         assert!(u.contains("peer_id=-qB4650-abcdefghijkl&port=51413&uploaded=5&downloaded=6&left=7"));
@@ -329,7 +351,7 @@ mod golden {
     fn request(profile: &str, event: Option<&str>) -> (String, String) {
         let p = profiles::resolve(profile, "", "");
         let h = hash_bytes(&format!("{}{}", "0123456789abcdef".repeat(2), "f0".repeat(4))).unwrap();
-        let params = Params { info_hash: &h, peer_id: &format!("{}abcdefghijkl", p.prefix), port: 51413, uploaded: 1000, downloaded: 0, left: 0, num_want: p.num_want, event, key: "AB12CD34", tracker_id: None, transmission_style: p.transmission_query };
+        let params = Params { info_hash: &h, peer_id: &format!("{}abcdefghijkl", p.prefix), port: 51413, uploaded: 1000, downloaded: 0, left: 0, num_want: p.num_want, event, key: "AB12CD34", tracker_id: None, transmission_style: p.transmission_query, utorrent_style: p.utorrent_query };
         (announce_url("http://t.example/announce", &params, HashEncoding::Raw, ""), p.user_agent)
     }
 
@@ -341,6 +363,23 @@ mod golden {
         let (u, ua) = request("deluge", None);
         assert_eq!(ua, "Deluge/2.1.1 libtorrent/2.0.9.0");
         assert_eq!(u, "http://t.example/announce?info_hash=%01%23Eg%89%AB%CD%EF%01%23Eg%89%AB%CD%EF%F0%F0%F0%F0&peer_id=-DE211s-abcdefghijkl&port=51413&uploaded=1000&downloaded=0&left=0&key=AB12CD34&numwant=200&compact=1&no_peer_id=1&supportcrypto=1");
+    }
+
+    #[test]
+    fn utorrent_announces_exactly_like_the_capture_of_a_real_one() {
+        // GET /announce?info_hash=B%e7%8a0%13m%84%2c%d4%2a%04%0e%df%92u%09%ee%e6%af%ff&peer_id=-UT360S-%1e%b9_%e7%92Kc%e5%eak%06%de&port=38934&uploaded=0&downloaded=0&left=11534966&corrupt=0&key=092B59D3&event=started&numwant=200&compact=1&no_peer_id=1
+        // from uTorrent 3.6.0 (User-Agent uTorrent/360(113359134)(47390)), recorded by a tracker test dashboard.
+        let h = hash_bytes("42e78a30136d842cd42a040edf927509eee6afff").unwrap();
+        let id: String = [0x2du8, 0x55, 0x54, 0x33, 0x36, 0x30, 0x53, 0x2d, 0x1e, 0xb9, 0x5f, 0xe7, 0x92, 0x4b, 0x63, 0xe5, 0xea, 0x6b, 0x06, 0xde].iter().map(|&b| b as char).collect();
+        let p = profiles::resolve("utorrent", "", "");
+        assert_eq!(p.user_agent, "uTorrent/360(113359134)(47390)");
+        let params = Params { info_hash: &h, peer_id: &id, port: 38934, uploaded: 0, downloaded: 0, left: 11_534_966, num_want: p.num_want, event: Some("started"), key: "092B59D3", tracker_id: None, transmission_style: false, utorrent_style: p.utorrent_query };
+        assert_eq!(
+            announce_url("http://127.0.0.1:8000/announce", &params, HashEncoding::Raw, ""),
+            "http://127.0.0.1:8000/announce?info_hash=B%e7%8a0%13m%84%2c%d4%2a%04%0e%df%92u%09%ee%e6%af%ff&peer_id=-UT360S-%1e%b9_%e7%92Kc%e5%eak%06%de&port=38934&uploaded=0&downloaded=0&left=11534966&corrupt=0&key=092B59D3&event=started&numwant=200&compact=1&no_peer_id=1"
+        );
+        let periodic = announce_url("http://t/announce", &Params { event: None, ..params }, HashEncoding::Raw, "");
+        assert!(periodic.ends_with("&key=092B59D3&numwant=200&compact=1&no_peer_id=1"), "{periodic}");
     }
 
     #[test]

@@ -101,7 +101,7 @@ impl LoopCtx {
                     .zip(&self.had)
                     .map(|(id, had)| {
                         let mut peer_id = [b'-'; 20];
-                        peer_id.iter_mut().zip(id.peer_id.bytes()).for_each(|(d, b)| *d = b);
+                        peer_id.iter_mut().zip(crate::identity::peer_id_bytes(&id.peer_id)).for_each(|(d, b)| *d = b);
                         NodeCfg { up: s.upload, down: s.download, personality: id.personality(s.stealth.spread()), seed: id.seed(), peer_id, unchoke_secs: profiles::resolve(&id.client_profile, "", "").unchoke_secs, initial_have: *had }
                     })
                     .collect();
@@ -457,12 +457,13 @@ async fn announce_round(sh: &Shared, client: &reqwest::Client, hash: &str, ih: &
         key: &peer.identity.key,
         tracker_id: peer.tracker_id.as_deref(),
         transmission_style: profile.transmission_query,
+        utorrent_style: profile.utorrent_query,
     };
     debug!("announce identity={} uploaded={} downloaded={} left={} event={}", peer.identity.identity_id, p.uploaded, p.downloaded, p.left, event.unwrap_or("none"));
     let (mut merged, mut ok, mut last_err) = (Answer::default(), false, String::new());
     for t in &trackers {
         let url = tracker::announce_url(t, &p, sh.settings.info_hash_encoding, &sh.extra);
-        let answer = tokio::time::timeout(per_tracker, tracker::get(client, &url, &profile.user_agent)).await.unwrap_or_else(|_| Err("timed out".into()));
+        let answer = tokio::time::timeout(per_tracker, tracker::get(client, &url, &profile.user_agent, profile.utorrent_query)).await.unwrap_or_else(|_| Err("timed out".into()));
         match answer.and_then(|b| tracker::parse_answer(&b)) {
             Ok(a) => {
                 ok = true;
@@ -485,7 +486,7 @@ async fn announce_round(sh: &Shared, client: &reqwest::Client, hash: &str, ih: &
 async fn scrape_round(sh: &Shared, client: &reqwest::Client, hash: &str, ih: &[u8; 20], profile: &Profile) -> Option<(Option<u64>, Option<u64>)> {
     for t in http_trackers(sh, hash) {
         let Some(url) = tracker::scrape_url(&t, ih, sh.settings.info_hash_encoding, &sh.extra) else { continue };
-        match tracker::get(client, &url, &profile.user_agent).await.and_then(|b| tracker::parse_scrape(&b, ih)) {
+        match tracker::get(client, &url, &profile.user_agent, profile.utorrent_query).await.and_then(|b| tracker::parse_scrape(&b, ih)) {
             Ok(counts) => return Some(counts),
             Err(e) => debug!("scrape failed tracker={} {e}", origin(&t)),
         }

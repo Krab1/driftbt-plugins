@@ -126,7 +126,7 @@ impl Store {
         let lower = requested.to_ascii_lowercase();
         // Anything that isn't a known client is `auto`: a made-up name could never be matched and would add identities forever.
         let want = match crate::profiles::canonical(lower.trim()) {
-            n @ ("qbittorrent" | "transmission" | "deluge" | "custom" | "debug_obvious") => n,
+            n @ ("qbittorrent" | "transmission" | "deluge" | "utorrent" | "custom" | "debug_obvious") => n,
             _ => "auto",
         };
         if want != "auto" {
@@ -208,7 +208,7 @@ mod client_tests {
     #[test]
     fn an_unknown_client_name_means_auto_instead_of_looping() {
         let mut s = Store::load(std::env::temp_dir().join(format!("tracker-sim-cl-{}", rng::entropy())).join("state.json"));
-        let a = s.identity(1, "Utorrent", "");
+        let a = s.identity(1, "Vuze", "");
         assert_eq!(s.state.identities.len(), 2, "no runaway identities");
         assert_eq!(s.identity(1, "  ", ""), a);
         let t = s.identity(0, "Transmission", "");

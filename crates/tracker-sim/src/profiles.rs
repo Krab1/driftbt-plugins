@@ -14,6 +14,8 @@ pub struct Profile {
     pub unchoke_secs: u64,
     /// Transmission orders and names its announce parameters differently from libtorrent clients.
     pub transmission_query: bool,
+    /// uTorrent's own query (a `corrupt` field, no `supportcrypto`), lower-case percent codes and `Connection: close`.
+    pub utorrent_query: bool,
 }
 
 pub const CONCRETE: [&str; 3] = ["qbittorrent", "transmission", "deluge"];
@@ -30,9 +32,11 @@ pub fn canonical(name: &str) -> &str {
 }
 
 pub fn resolve(name: &str, custom_prefix: &str, custom_ua: &str) -> Profile {
-    let p = |prefix: &str, ua: &str, num_want, port_lo, port_hi, lower_body, unchoke_secs| Profile { prefix: prefix.into(), user_agent: ua.into(), num_want, port_lo, port_hi, lower_body, unchoke_secs, transmission_query: false };
+    let p = |prefix: &str, ua: &str, num_want, port_lo, port_hi, lower_body, unchoke_secs| Profile { prefix: prefix.into(), user_agent: ua.into(), num_want, port_lo, port_hi, lower_body, unchoke_secs, transmission_query: false, utorrent_query: false };
     match canonical(name) {
         "transmission" => Profile { transmission_query: true, ..p("-TR4040-", "Transmission/4.0.4", 80, 51413, 51413, true, 10) },
+        // Copied from a real uTorrent 3.6.0 announce (see docs/captures/utorrent-3.6.0.txt): peer id -UT360S- plus 12 random bytes.
+        "utorrent" => Profile { utorrent_query: true, ..p("-UT360S-", "uTorrent/360(113359134)(47390)", 200, 10_000, 65_000, false, 10) },
         "deluge" => p("-DE211s-", "Deluge/2.1.1 libtorrent/2.0.9.0", 200, 6881, 6891, false, 15),
         "debug_obvious" => p("-DRSIM0-", "tracker-sim-debug", 50, 6881, 6881, false, 5),
         "custom" => {
