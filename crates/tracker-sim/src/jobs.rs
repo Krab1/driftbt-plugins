@@ -495,6 +495,8 @@ async fn scrape_round(sh: &Shared, client: &reqwest::Client, hash: &str, ih: &[u
 
 /// Puts a peer's current numbers where the statistics window reads them.
 fn publish(sh: &Shared, hash: &str, who: &str, peer: &Peer, state: &'static str, next: Option<Instant>) {
+    // Running but with nobody to give to or take from (the tracker's own counts): say so instead of "active".
+    let state = if state == "active" && peer.starved() { "idle" } else { state };
     sh.stats.with(hash, |t| {
         if let Some(p) = t.peers.get_mut(who) {
             (p.state, p.uploaded, p.downloaded, p.left, p.next_at) = (state, peer.uploaded, peer.downloaded, peer.left(), next);
@@ -640,7 +642,7 @@ async fn run_peer(sh: Arc<Shared>, client: reqwest::Client, hash: String, id: Id
                     if s.follow_tracker {
                         hint = (a.interval.is_some() || a.min_interval.is_some()).then(|| Hint { interval: a.interval.unwrap_or(0), min_interval: a.min_interval.unwrap_or(0) });
                         // A loopback peer's speeds are real transfers, not set by the tracker's numbers.
-                        if node.is_none() && (a.complete.is_some() || a.incomplete.is_some()) {
+                        if node.is_none() && !s.ignore_demand && (a.complete.is_some() || a.incomplete.is_some()) {
                             apply_demand(&mut peer, &own, a.complete, a.incomplete);
                         }
                     }
@@ -678,7 +680,7 @@ async fn run_peer(sh: Arc<Shared>, client: reqwest::Client, hash: String, id: Id
         }
         if s.scrape_enabled && started && Instant::now() >= next_scrape {
             if let Some((c, i)) = scrape_round(&sh, &client, &hash, &ih, &profile).await {
-                if s.follow_tracker && node.is_none() {
+                if s.follow_tracker && !s.ignore_demand && node.is_none() {
                     apply_demand(&mut peer, &own, c, i);
                 }
             }

@@ -134,6 +134,11 @@ impl Peer {
         self.apply_bands();
     }
 
+    /// The tracker's numbers leave nothing to do: a seeder with no leechers, or a downloader with no seeders. Counters stand still until the next answer.
+    pub fn starved(&self) -> bool {
+        if self.left() == 0 { self.demand_up == 0.0 } else { self.demand_down == 0.0 }
+    }
+
     fn apply_bands(&mut self) {
         self.up.set_activity(self.activity * self.demand_up);
         self.down.set_activity(self.activity * self.demand_down);
@@ -285,7 +290,9 @@ mod tests {
         p.set_demand(0.0, 1.0);
         (0..100).for_each(|_| p.step(0.1));
         assert_eq!(p.uploaded, 0, "no leechers, no upload");
+        assert!(p.starved(), "and the window says idle, not active");
         p.set_demand(1.0, 1.0);
+        assert!(!p.starved());
         (0..100).for_each(|_| p.step(0.1));
         assert!(p.uploaded > 0);
     }

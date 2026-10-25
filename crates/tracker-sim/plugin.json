@@ -1,7 +1,7 @@
 {
   "id": "tracker-sim",
   "name": "Tracker Simulator",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "api": 1,
   "kinds": [
     "simulator"
@@ -254,6 +254,12 @@
       "label": "Follow tracker data",
       "type": "bool",
       "help": "Use the tracker's interval and its seeder and leecher counts."
+    },
+    {
+      "key": "ignore_demand",
+      "label": "Ignore tracker demand",
+      "type": "bool",
+      "help": "Keep uploading (or downloading) at the set speeds even when the tracker shows no leechers (or no seeders). Off: with nobody to give to, the simulation idles until the tracker's numbers change."
     },
     {
       "key": "activity_pattern",

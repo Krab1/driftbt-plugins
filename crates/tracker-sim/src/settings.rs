@@ -170,6 +170,8 @@ pub struct Settings {
     pub start_delay_max_ms: u64,
     /// Use the tracker's interval and counts (see `demand.rs`).
     pub follow_tracker: bool,
+    /// Keep the set speeds whatever the tracker's seeder and leecher counts say (this torrent only; off by default).
+    pub ignore_demand: bool,
     pub upload: RateCfg,
     pub download: RateCfg,
     pub activity_pattern: bool,
@@ -192,11 +194,11 @@ pub struct Settings {
 }
 
 /// What a torrent can set for itself: the fields of `torrent_settings` in plugin.json.
-const TORRENT_KEYS: [&str; 13] = ["client_profile", "mode", "peers", "upload_rate_profile", "upload_min_kbps", "upload_max_kbps", "download_rate_profile", "download_min_kbps", "download_max_kbps", "partial_availability_percent", "piece_strategy", "follow_tracker", "activity_pattern"];
+const TORRENT_KEYS: [&str; 14] = ["client_profile", "mode", "peers", "upload_rate_profile", "upload_min_kbps", "upload_max_kbps", "download_rate_profile", "download_min_kbps", "download_max_kbps", "partial_availability_percent", "piece_strategy", "follow_tracker", "ignore_demand", "activity_pattern"];
 
 /// Settings that used to be in the global form. They are chosen per torrent now (or are fixed), so values an older
 /// version saved are ignored: a forgotten "off" must not outlive the form that set it.
-const RETIRED: [&str; 18] = ["client_profile", "default_mode", "default_peer_count", "peer_count_max", "partial_availability_percent", "piece_strategy", "follow_tracker", "activity_pattern", "upload_rate_profile", "upload_min_kbps", "upload_max_kbps", "download_rate_profile", "download_min_kbps", "download_max_kbps", "persist_counters", "send_started_event", "scrape_enabled", "scrape_interval_ms"];
+const RETIRED: [&str; 19] = ["ignore_demand", "client_profile", "default_mode", "default_peer_count", "peer_count_max", "partial_availability_percent", "piece_strategy", "follow_tracker", "activity_pattern", "upload_rate_profile", "upload_min_kbps", "upload_max_kbps", "download_rate_profile", "download_min_kbps", "download_max_kbps", "persist_counters", "send_started_event", "scrape_enabled", "scrape_interval_ms"];
 
 fn text<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
     v.get(k)?.as_str().map(str::trim).filter(|s| !s.is_empty())
@@ -294,6 +296,7 @@ impl Settings {
         m.insert("partial_availability_percent".into(), Value::from(self.partial_percent.round() as u64));
         m.insert("piece_strategy".into(), self.piece_strategy.name().into());
         m.insert("follow_tracker".into(), self.follow_tracker.into());
+        m.insert("ignore_demand".into(), self.ignore_demand.into());
         m.insert("activity_pattern".into(), self.activity_pattern.into());
         m
     }
@@ -319,6 +322,7 @@ impl Settings {
             jitter: num(v, "announce_jitter_percent").unwrap_or(25.0).clamp(0.0, 90.0) / 100.0,
             start_delay_max_ms: num(v, "start_delay_max_ms").unwrap_or(15_000.0).clamp(0.0, 300_000.0) as u64,
             follow_tracker: flag(v, "follow_tracker", true),
+            ignore_demand: flag(v, "ignore_demand", false),
             upload: rate(v, "upload", RateProfile::Bursty, 100.0, 800.0),
             download: rate(v, "download", RateProfile::RandomWalk, 20.0, 500.0),
             activity_pattern: flag(v, "activity_pattern", false),
@@ -415,6 +419,15 @@ mod tests {
         let t = g.for_torrent(json!({"client_profile": "transmission"}).as_object().unwrap());
         assert_eq!(t.client_profile, "transmission");
         assert_eq!(g.effective_options()["client_profile"], "auto");
+    }
+
+    #[test]
+    fn ignoring_demand_is_a_per_torrent_choice_and_off_by_default() {
+        let g = Settings::from_host(&json!({"ignore_demand": true}));
+        assert!(!g.ignore_demand, "not a global setting");
+        assert!(g.for_torrent(json!({"ignore_demand": true}).as_object().unwrap()).ignore_demand);
+        assert!(!g.for_torrent(json!({}).as_object().unwrap()).ignore_demand);
+        assert_eq!(g.effective_options()["ignore_demand"], false);
     }
 
     #[test]
