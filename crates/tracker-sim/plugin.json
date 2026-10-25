@@ -1,7 +1,7 @@
 {
   "id": "tracker-sim",
   "name": "Tracker Simulator",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "api": 1,
   "kinds": [
     "simulator"
@@ -139,7 +139,15 @@
         "custom",
         "debug_obvious"
       ],
-      "help": "Which client the peers pretend to be. auto: a mix. custom uses the custom peer id and user agent from the plugin settings. debug_obvious: an obvious -DRSIM0- peer id, for finding the bots in tracker logs. Each client has its own peers, so a peer keeps its id when you switch back."
+      "help": "Which client the peers pretend to be. auto: a mix. custom uses the custom peer id and user agent from the plugin settings. debug_obvious: an obvious -DRSIM0- peer id, for finding the bots in tracker logs. Each client has its own peers, so a peer keeps its id when you switch back.",
+      "option_help": {
+        "auto": "A mix of clients: each simulated peer gets one of qBittorrent, Transmission or Deluge and keeps it.",
+        "qbittorrent": "Every peer announces like qBittorrent: its peer id, User-Agent and query layout.",
+        "transmission": "Every peer announces like Transmission: its peer id, User-Agent and query layout.",
+        "deluge": "Every peer announces like Deluge (libtorrent): its peer id, User-Agent and query layout.",
+        "custom": "Uses the custom peer id prefix and User-Agent from the plugin settings.",
+        "debug_obvious": "Peers announce an obvious -DRSIM0- id, so you can find the simulated peers in your tracker logs."
+      }
     },
     {
       "key": "mode",
@@ -151,7 +159,13 @@
         "download_and_seed",
         "loopback_pair"
       ],
-      "help": "seed_only: has everything and uploads. partial_seed / download_and_seed: has part or none and downloads the rest. loopback_pair: the peers move real data between themselves on this computer (needs 2 or more)."
+      "help": "seed_only: has everything and uploads. partial_seed / download_and_seed: has part or none and downloads the rest. loopback_pair: the peers move real data between themselves on this computer (needs 2 or more).",
+      "option_help": {
+        "seed_only": "Peers have the whole torrent and only upload. Downloaded counters stay at zero.",
+        "partial_seed": "Peers start with part of the torrent, download the rest, then upload.",
+        "download_and_seed": "Peers start with nothing, download everything, then keep uploading.",
+        "loopback_pair": "Peers swap real data with each other on this computer, so the counters are bytes that really moved. Needs 2 or more peers."
+      }
     },
     {
       "key": "peers",
@@ -168,7 +182,12 @@
         "random_walk",
         "bursty"
       ],
-      "help": "How the upload speed moves between min and max."
+      "help": "How the upload speed moves between min and max.",
+      "option_help": {
+        "constant_jitter": "Steady: stays near the middle of min and max and wobbles about 15%. Looks like a seedbox with a stable line.",
+        "random_walk": "Drifts: the speed wanders up and down between min and max in smooth steps, like a connection shared with other traffic.",
+        "bursty": "Stop and go: quiet stretches (little or no upload), short fast bursts near the max, and normal stretches in between. Like peers that get requests in waves."
+      }
     },
     {
       "key": "upload_min_kbps",
@@ -189,7 +208,12 @@
         "random_walk",
         "bursty"
       ],
-      "help": "Only for modes that download."
+      "help": "Only for modes that download.",
+      "option_help": {
+        "constant_jitter": "Steady: stays near the middle of min and max and wobbles about 15%.",
+        "random_walk": "Drifts: the speed wanders up and down between min and max in smooth steps.",
+        "bursty": "Stop and go: quiet stretches, short fast bursts near the max, and normal stretches in between."
+      }
     },
     {
       "key": "download_min_kbps",
@@ -217,7 +241,13 @@
         "rarest_first",
         "endgame_bias"
       ],
-      "help": "For loopback_pair only."
+      "help": "For loopback_pair only.",
+      "option_help": {
+        "sequential": "Asks for pieces in order, first to last. Easy to read in logs; like streaming mode.",
+        "random": "Asks for pieces in random order.",
+        "rarest_first": "Asks for the pieces the fewest peers have first, as most real clients do.",
+        "endgame_bias": "Like rarest first, but near the end asks several peers for the last pieces at once."
+      }
     },
     {
       "key": "follow_tracker",
